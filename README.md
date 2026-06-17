@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="OrionSaga" width="150" />
+</p>
+
 # OrionSaga
 
 [![CI/CD](https://github.com/tunahanaliozturk/OrionSaga/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/tunahanaliozturk/OrionSaga/actions/workflows/ci-cd.yml)
