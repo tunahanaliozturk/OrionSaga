@@ -42,6 +42,38 @@ public sealed class SagaResultTests
     }
 
     [Fact]
+    public async Task A_business_failure_is_reported_as_failed_not_cancelled()
+    {
+        var saga = new SagaBuilder<object>()
+            .AddStep("a", (_, _) => Task.CompletedTask)
+            .AddStep("b", (_, _) => throw new InvalidOperationException("boom"))
+            .Build();
+
+        var result = await saga.RunAsync(new object());
+
+        // A plain exception is a business failure, never a cancellation.
+        Assert.Equal(SagaOutcome.Failed, result.Outcome);
+        Assert.True(result.Failed);
+        Assert.False(result.Cancelled);
+        Assert.False(result.TimedOut);
+    }
+
+    [Fact]
+    public async Task A_successful_run_is_reported_as_succeeded()
+    {
+        var saga = new SagaBuilder<object>()
+            .AddStep("a", (_, _) => Task.CompletedTask)
+            .Build();
+
+        var result = await saga.RunAsync(new object());
+
+        Assert.Equal(SagaOutcome.Succeeded, result.Outcome);
+        Assert.False(result.Failed);
+        Assert.False(result.Cancelled);
+        Assert.False(result.TimedOut);
+    }
+
+    [Fact]
     public async Task A_dirty_rollback_is_not_clean_and_lists_each_compensation_failure()
     {
         var saga = new SagaBuilder<object>()

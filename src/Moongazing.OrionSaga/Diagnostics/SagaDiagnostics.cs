@@ -17,7 +17,7 @@ public sealed class SagaDiagnostics : IDisposable
     /// <summary>Create the meter and its instruments.</summary>
     public SagaDiagnostics()
     {
-        meter = new Meter(MeterName, "0.1.0");
+        meter = new Meter(MeterName, "0.2.0");
 
         Runs = meter.CreateCounter<long>(
             "orionsaga.runs",

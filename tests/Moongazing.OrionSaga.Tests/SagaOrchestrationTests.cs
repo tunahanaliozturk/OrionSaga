@@ -116,7 +116,7 @@ public sealed class SagaOrchestrationTests
     }
 
     [Fact]
-    public async Task A_step_that_observes_cancellation_is_treated_as_a_failure_and_rolls_back()
+    public async Task A_step_that_observes_cancellation_is_reported_as_cancelled_not_failed_and_rolls_back()
     {
         var ledger = new Ledger();
         using var cts = new CancellationTokenSource();
@@ -135,8 +135,13 @@ public sealed class SagaOrchestrationTests
 
         var result = await saga.RunAsync(ledger, cts.Token);
 
-        // The executor does not pre-check the token; a cancelling step surfaces as a normal failure.
+        // A cancellation is reported distinctly from a business failure: Cancelled, not Failed.
         Assert.False(result.Succeeded);
+        Assert.Equal(SagaOutcome.Cancelled, result.Outcome);
+        Assert.True(result.Cancelled);
+        Assert.False(result.Failed);
+        // Caller cancellation, not a per-step timeout.
+        Assert.False(result.TimedOut);
         Assert.Equal("b", result.FailedStep);
         Assert.IsAssignableFrom<OperationCanceledException>(result.Failure);
         Assert.Equal(["undo-a"], ledger.Events);
