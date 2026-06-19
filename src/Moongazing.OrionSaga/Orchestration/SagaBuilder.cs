@@ -18,12 +18,17 @@ public sealed class SagaBuilder<TContext>
     /// <param name="name">The step name.</param>
     /// <param name="execute">The forward action.</param>
     /// <param name="compensate">The compensating action; a no-op when null.</param>
+    /// <param name="timeout">
+    /// An optional maximum duration for the forward action. When it overruns, the step is cancelled
+    /// and the saga rolls back, reporting the timeout. Null means no budget. Must be positive when set.
+    /// </param>
     public SagaBuilder<TContext> AddStep(
         string name,
         Func<TContext, CancellationToken, Task> execute,
-        Func<TContext, CancellationToken, Task>? compensate = null)
+        Func<TContext, CancellationToken, Task>? compensate = null,
+        TimeSpan? timeout = null)
     {
-        steps.Add(new SagaStep<TContext>(name, execute, compensate));
+        steps.Add(new SagaStep<TContext>(name, execute, compensate, timeout));
         return this;
     }
 

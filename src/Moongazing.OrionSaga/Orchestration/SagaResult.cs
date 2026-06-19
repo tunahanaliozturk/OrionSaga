@@ -6,29 +6,73 @@ namespace Moongazing.OrionSaga.Orchestration;
 public readonly record struct CompensationFailure(string StepName, Exception Exception);
 
 /// <summary>
-/// The outcome of running a saga: success, or the step that failed plus the result of rolling back.
+/// How a saga run ended. Distinguishes a business failure from a cancellation so callers can tell an
+/// operator or timeout cancellation apart from a step that genuinely faulted.
+/// </summary>
+public enum SagaOutcome
+{
+    /// <summary>Every step completed; no rollback ran.</summary>
+    Succeeded = 0,
+
+    /// <summary>A step's forward action threw a non-cancellation exception; completed steps rolled back.</summary>
+    Failed = 1,
+
+    /// <summary>
+    /// The run was cancelled rather than failing on its own: either the caller's token was cancelled
+    /// or a step exceeded its per-step timeout. Completed steps rolled back.
+    /// </summary>
+    Cancelled = 2,
+}
+
+/// <summary>
+/// The outcome of running a saga: success, or the step that ended it (a failure, a cancellation, or a
+/// per-step timeout) plus the result of rolling back.
 /// </summary>
 public sealed class SagaResult
 {
     private SagaResult(
-        bool succeeded,
+        SagaOutcome outcome,
         string? failedStep,
         Exception? failure,
+        bool timedOut,
         IReadOnlyList<CompensationFailure> compensationFailures)
     {
-        Succeeded = succeeded;
+        Outcome = outcome;
         FailedStep = failedStep;
         Failure = failure;
+        TimedOut = timedOut;
         CompensationFailures = compensationFailures;
     }
 
-    /// <summary>True when every step completed.</summary>
-    public bool Succeeded { get; }
+    /// <summary>How the run ended.</summary>
+    public SagaOutcome Outcome { get; }
 
-    /// <summary>The name of the step that failed, or null on success.</summary>
+    /// <summary>True when every step completed.</summary>
+    public bool Succeeded => Outcome == SagaOutcome.Succeeded;
+
+    /// <summary>
+    /// True when the run was cancelled (by the caller's token or a per-step timeout) rather than
+    /// failing on its own. Distinct from <see cref="Failed"/> so a cancellation is not mistaken for a
+    /// business failure.
+    /// </summary>
+    public bool Cancelled => Outcome == SagaOutcome.Cancelled;
+
+    /// <summary>True when a step's forward action threw a non-cancellation exception.</summary>
+    public bool Failed => Outcome == SagaOutcome.Failed;
+
+    /// <summary>
+    /// True when the cancellation was caused by a step exceeding its per-step timeout rather than by
+    /// the caller's token. Always false unless <see cref="Cancelled"/> is true.
+    /// </summary>
+    public bool TimedOut { get; }
+
+    /// <summary>The name of the step that ended the saga, or null on success.</summary>
     public string? FailedStep { get; }
 
-    /// <summary>The exception that failed the saga, or null on success.</summary>
+    /// <summary>
+    /// The exception that ended the saga, or null on success. For a cancellation this is the
+    /// observed <see cref="OperationCanceledException"/>.
+    /// </summary>
     public Exception? Failure { get; }
 
     /// <summary>
@@ -38,13 +82,20 @@ public sealed class SagaResult
     /// </summary>
     public IReadOnlyList<CompensationFailure> CompensationFailures { get; }
 
-    /// <summary>True when the saga failed but every completed step compensated cleanly.</summary>
+    /// <summary>True when the saga did not succeed but every completed step compensated cleanly.</summary>
     public bool RolledBackCleanly => !Succeeded && CompensationFailures.Count == 0;
 
     internal static SagaResult Success { get; } =
-        new(succeeded: true, failedStep: null, failure: null, []);
+        new(SagaOutcome.Succeeded, failedStep: null, failure: null, timedOut: false, []);
 
-    internal static SagaResult Failed(
+    internal static SagaResult CreateFailed(
         string failedStep, Exception failure, IReadOnlyList<CompensationFailure> compensationFailures) =>
-        new(succeeded: false, failedStep, failure, compensationFailures);
+        new(SagaOutcome.Failed, failedStep, failure, timedOut: false, compensationFailures);
+
+    internal static SagaResult CreateCancelled(
+        string failedStep,
+        Exception failure,
+        bool timedOut,
+        IReadOnlyList<CompensationFailure> compensationFailures) =>
+        new(SagaOutcome.Cancelled, failedStep, failure, timedOut, compensationFailures);
 }
