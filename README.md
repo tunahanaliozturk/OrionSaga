@@ -31,8 +31,9 @@ DI abstractions. There is no message broker, no database, and no background proc
 
 A saga is an ordered list of steps. Each step has a forward action and an optional compensating
 action that undoes it. `RunAsync` walks the steps in order over a single shared context. The first
-step to throw stops forward progress; every step that already completed is then compensated in
-reverse order, and a `SagaResult` reports exactly what happened.
+step to throw, be cancelled, or overrun its optional per-step timeout stops forward progress; every
+step that already completed is then compensated in reverse order, and a `SagaResult` reports exactly
+what happened, including whether the run succeeded, failed, or was cancelled.
 
 ```mermaid
 flowchart LR
@@ -162,14 +163,55 @@ A missing compensation is treated as a no-op during rollback.
 
 ### Cancellation
 
-`RunAsync` takes a `CancellationToken` that cancels *forward* progress. Rollback always runs with a
-non-cancelled token, so a saga cancelled mid-flight still unwinds the work it already did:
+`RunAsync` takes a `CancellationToken` that cancels *forward* progress. A cancellation is reported as
+`SagaOutcome.Cancelled`, distinct from a business `Failed`, so an operator or timeout cancellation is
+not mistaken for a step that genuinely faulted. Rollback always runs with a non-cancelled token, so a
+saga cancelled mid-flight still unwinds the work it already did:
 
 ```csharp
 var result = await saga.RunAsync(context, cancellationToken);
-// If the token is cancelled during a step, that step's OperationCanceledException
-// fails the saga and the completed steps are still compensated.
+
+if (result.Cancelled)
+{
+    // The caller's token (or a per-step timeout) cancelled the run. Completed steps were rolled back.
+    logger.LogWarning("Order saga cancelled at {Step}", result.FailedStep);
+}
 ```
+
+`Cancelled` and `Failed` are mutually exclusive: a cancellation never sets `Failed`, and a forward
+fault never sets `Cancelled`. The completed steps are compensated in both cases.
+
+### Per-step timeouts
+
+A step can declare a maximum forward-action duration with the `timeout` argument on `AddStep`. When
+the forward action overruns that budget it is cancelled, the saga rolls back the completed steps, and
+the result is reported as `Cancelled` with `TimedOut` set to true:
+
+```csharp
+var saga = new SagaBuilder<OrderContext>()
+    .AddStep("reserve-stock",
+        execute:    (ctx, ct) => inventory.ReserveAsync(ctx.OrderId, ct),
+        compensate: (ctx, ct) => inventory.ReleaseAsync(ctx.OrderId, ct))
+    .AddStep("book-courier",
+        execute:    (ctx, ct) => courier.BookAsync(ctx.OrderId, ct),
+        compensate: (ctx, ct) => courier.CancelAsync(ctx.OrderId, ct),
+        timeout:    TimeSpan.FromSeconds(2)) // forward action must finish within 2s
+    .Build();
+
+var result = await saga.RunAsync(context, ct);
+
+if (result.TimedOut)
+{
+    logger.LogWarning("Order saga timed out at {Step}", result.FailedStep);
+}
+```
+
+The per-step deadline is honoured alongside the caller's `CancellationToken` through a linked token,
+so external cancellation still works. The budget must be strictly positive; a null `timeout` (the
+default) means no budget. `TimedOut` is true only when the per-step deadline genuinely fired: a step
+that throws `OperationCanceledException` for an unrelated reason (its own HttpClient timeout, a child
+token it cancels itself) is reported as `Cancelled` but not as `TimedOut`. `TimedOut` is always false
+unless `Cancelled` is true.
 
 ### Observers
 
@@ -213,11 +255,15 @@ Attach a `SagaDiagnostics` instance to emit metrics. See [Telemetry](#telemetry)
 
 | Property | Meaning |
 |----------|---------|
+| `Outcome` | The `SagaOutcome`: `Succeeded`, `Failed`, or `Cancelled`. |
 | `Succeeded` | True when every step completed. |
-| `FailedStep` | The name of the step that threw, or null on success. |
-| `Failure` | The exception that failed the saga, or null on success. |
+| `Failed` | True when a step's forward action threw a non-cancellation exception. |
+| `Cancelled` | True when the run was cancelled by the caller's token or a per-step timeout, rather than failing on its own. |
+| `TimedOut` | True when the cancellation was caused by a step exceeding its per-step timeout. Always false unless `Cancelled` is true. |
+| `FailedStep` | The name of the step that ended the saga, or null on success. |
+| `Failure` | The exception that ended the saga, or null on success. For a cancellation this is the observed `OperationCanceledException`. |
 | `CompensationFailures` | Compensations that themselves threw during rollback. Empty on success or a clean rollback. |
-| `RolledBackCleanly` | True when the saga failed but every completed step compensated cleanly. |
+| `RolledBackCleanly` | True when the saga did not succeed but every completed step compensated cleanly. |
 
 Each entry in `CompensationFailures` is a `CompensationFailure(string StepName, Exception Exception)`
 readonly record struct.
@@ -225,8 +271,11 @@ readonly record struct.
 ### Semantics
 
 - Steps run in the order they are added, sharing one context instance.
-- The first step to throw stops forward progress. The step that failed is **not** compensated; every
-  step that completed is compensated in reverse order.
+- The first step to throw, be cancelled, or overrun its per-step timeout stops forward progress. The
+  step that ended the saga is **not** compensated; every step that completed is compensated in
+  reverse order.
+- A forward fault yields `Outcome == Failed`. The caller's token being cancelled or a step overrunning
+  its per-step timeout yields `Outcome == Cancelled`, with `TimedOut` true only for a genuine timeout.
 - A compensation that itself throws is recorded in `CompensationFailures` and rollback continues for
   the remaining steps.
 - `RolledBackCleanly` is true when the saga failed but every compensation succeeded.
@@ -241,7 +290,7 @@ readonly record struct.
 
 | Method | Purpose |
 |--------|---------|
-| `AddStep(name, execute, compensate?)` | Add a step from a name, a forward action, and an optional compensation. |
+| `AddStep(name, execute, compensate?, timeout?)` | Add a step from a name, a forward action, an optional compensation, and an optional per-step timeout. |
 | `AddStep(SagaStep<TContext>)` | Add an already-constructed `SagaStep<TContext>`. |
 | `WithObserver(ISagaObserver)` | Attach an observer for progress notifications. |
 | `WithDiagnostics(SagaDiagnostics)` | Attach the metrics meter. |
@@ -368,11 +417,12 @@ See [benchmarks.md](benchmarks.md) for the benchmark classes and how to run or f
 ## Versioning
 
 OrionSaga follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The public surface is
-`SagaBuilder<TContext>`, `Saga<TContext>`, `SagaStep<TContext>`, `SagaResult`, `CompensationFailure`,
-`ISagaObserver`, `SagaDiagnostics`, and the `AddOrionSaga` extension. Breaking changes to that
-surface come with a major version bump. See [CHANGELOG.md](CHANGELOG.md) for the release history.
+`SagaBuilder<TContext>`, `Saga<TContext>`, `SagaStep<TContext>`, `SagaResult`, `SagaOutcome`,
+`CompensationFailure`, `ISagaObserver`, `SagaDiagnostics`, and the `AddOrionSaga` extension. Breaking
+changes to that surface come with a major version bump. See [CHANGELOG.md](CHANGELOG.md) for the
+release history.
 
-The library is currently at **0.1.0**: the API is young and may still change ahead of a 1.0.
+The library is currently at **0.2.0**: the API is young and may still change ahead of a 1.0.
 
 ---
 
