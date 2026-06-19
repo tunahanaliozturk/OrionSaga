@@ -51,7 +51,12 @@ public sealed class Saga<TContext>
             {
                 // A cancellation is not a business failure: it is either the caller cancelling or the
                 // step overrunning its per-step timeout. Either way, roll back and report it distinctly.
-                var timedOut = step.Timeout is not null && !cancellationToken.IsCancellationRequested;
+                // TimedOut is reported only when the per-step deadline genuinely elapsed: ExecuteStep
+                // raises SagaStepTimeoutException exclusively in that case. It is never inferred from a
+                // timeout merely being configured, so a step that throws OperationCanceledException for
+                // unrelated reasons (its own HttpClient timeout, a child token it cancels itself) while
+                // the deadline never fired is not misreported as a timeout.
+                var timedOut = ex is SagaStepTimeoutException;
                 diagnostics?.RecordStep(completed: false);
                 SafeObserve(() => observer.OnStepFailed(step.Name, ex));
 
@@ -85,10 +90,29 @@ public sealed class Saga<TContext>
         }
 
         // Link the caller's token with a per-step deadline so either source cancels the forward action.
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        linked.CancelAfter(budget);
-        await step.Execute(context, linked.Token).ConfigureAwait(false);
+        using var timeoutCts = new CancellationTokenSource();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+        timeoutCts.CancelAfter(budget);
+        try
+        {
+            await step.Execute(context, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex) when (TimeoutDeadlineFired(timeoutCts, cancellationToken))
+        {
+            // The per-step deadline genuinely elapsed and the caller did not cancel: report a timeout.
+            // Any other OperationCanceledException (the caller's token, or a token the step cancels
+            // for its own reasons) propagates unchanged so it is not misreported as a timeout.
+            throw new SagaStepTimeoutException(step.Name, budget, ex);
+        }
     }
+
+    /// <summary>
+    /// True when the per-step timeout source is the cancellation that actually fired: its deadline
+    /// elapsed and the caller's token was not the trigger. This distinguishes a real deadline overrun
+    /// from a cancellation the step raised for an unrelated reason while a timeout was merely configured.
+    /// </summary>
+    private static bool TimeoutDeadlineFired(CancellationTokenSource timeoutCts, CancellationToken callerToken)
+        => timeoutCts.IsCancellationRequested && !callerToken.IsCancellationRequested;
 
     private async Task<IReadOnlyList<CompensationFailure>> CompensateAsync(
         Stack<SagaStep<TContext>> completed, TContext context)

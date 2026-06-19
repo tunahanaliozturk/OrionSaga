@@ -118,6 +118,15 @@ public sealed class SagaTimeoutTests
 
         Assert.True(sawCallerCancellation);
         Assert.Equal(SagaOutcome.Cancelled, result.Outcome);
+        Assert.True(result.Cancelled);
+        // The caller's token must be what cancelled the step. Asserting NOT TimedOut proves the linked
+        // token honoured the caller's token: if token-linking regressed, the only way this timed step
+        // could cancel would be its own per-step deadline, which would set TimedOut and fail here
+        // instead of passing on an unrelated cancellation path (a false positive).
+        Assert.False(result.TimedOut);
+        Assert.Equal("a", result.FailedStep);
+        Assert.IsAssignableFrom<OperationCanceledException>(result.Failure);
+        Assert.IsNotType<SagaStepTimeoutException>(result.Failure);
     }
 
     [Fact]
