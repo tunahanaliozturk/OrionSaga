@@ -6,6 +6,15 @@ All notable changes to OrionSaga are documented in this file. The format is base
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-20
+
+### Performance
+
+- `Saga.RunAsync` no longer allocates a per-step closure to dispatch observer notifications, and it
+  skips the notification path entirely when no observer is registered (the default null observer).
+  On the no-observer happy path this cuts per-run orchestration allocation substantially. Behaviour,
+  public API, and observer call ordering are unchanged.
+
 ## [0.2.0] - 2026-06-19
 
 ### Added
