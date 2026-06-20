@@ -15,6 +15,7 @@ public sealed class Saga<TContext>
     private readonly IReadOnlyList<SagaStep<TContext>> steps;
     private readonly SagaDiagnostics? diagnostics;
     private readonly ISagaObserver observer;
+    private readonly bool hasObserver;
 
     internal Saga(IReadOnlyList<SagaStep<TContext>> steps, SagaDiagnostics? diagnostics, ISagaObserver? observer)
     {
@@ -22,6 +23,10 @@ public sealed class Saga<TContext>
         this.steps = steps;
         this.diagnostics = diagnostics;
         this.observer = observer ?? NullSagaObserver.Instance;
+
+        // The default observer is the inert null singleton. Detecting it once lets the hot path skip
+        // the per-step notify entirely (no closure, no no-op call) when no real observer is registered.
+        hasObserver = !ReferenceEquals(this.observer, NullSagaObserver.Instance);
     }
 
     /// <summary>
@@ -36,7 +41,9 @@ public sealed class Saga<TContext>
     /// <param name="cancellationToken">Cancels forward progress (rollback still runs).</param>
     public async Task<SagaResult> RunAsync(TContext context, CancellationToken cancellationToken = default)
     {
-        var completed = new Stack<SagaStep<TContext>>();
+        // Pre-size to the step count: every forward step that completes is pushed, so this is the
+        // exact upper bound and avoids the stack's internal array resizing as steps complete.
+        var completed = new Stack<SagaStep<TContext>>(steps.Count);
 
         foreach (var step in steps)
         {
@@ -45,7 +52,7 @@ public sealed class Saga<TContext>
                 await ExecuteStep(step, context, cancellationToken).ConfigureAwait(false);
                 completed.Push(step);
                 diagnostics?.RecordStep(completed: true);
-                SafeObserve(() => observer.OnStepCompleted(step.Name));
+                NotifyStepCompleted(step.Name);
             }
             catch (OperationCanceledException ex)
             {
@@ -58,7 +65,7 @@ public sealed class Saga<TContext>
                 // the deadline never fired is not misreported as a timeout.
                 var timedOut = ex is SagaStepTimeoutException;
                 diagnostics?.RecordStep(completed: false);
-                SafeObserve(() => observer.OnStepFailed(step.Name, ex));
+                NotifyStepFailed(step.Name, ex);
 
                 var cancelFailures = await CompensateAsync(completed, context).ConfigureAwait(false);
                 diagnostics?.RecordRun(succeeded: false);
@@ -69,7 +76,7 @@ public sealed class Saga<TContext>
 #pragma warning restore CA1031
             {
                 diagnostics?.RecordStep(completed: false);
-                SafeObserve(() => observer.OnStepFailed(step.Name, ex));
+                NotifyStepFailed(step.Name, ex);
 
                 var compensationFailures = await CompensateAsync(completed, context).ConfigureAwait(false);
                 diagnostics?.RecordRun(succeeded: false);
@@ -127,7 +134,7 @@ public sealed class Saga<TContext>
                 // Roll back with a non-cancelled token: a cancelled saga must still undo its work.
                 await step.Compensate(context, CancellationToken.None).ConfigureAwait(false);
                 diagnostics?.RecordCompensation(compensated: true);
-                SafeObserve(() => observer.OnCompensated(step.Name));
+                NotifyCompensated(step.Name);
             }
 #pragma warning disable CA1031 // record a compensation fault but keep rolling back the remaining steps
             catch (Exception ex)
@@ -135,18 +142,85 @@ public sealed class Saga<TContext>
             {
                 failures.Add(new CompensationFailure(step.Name, ex));
                 diagnostics?.RecordCompensation(compensated: false);
-                SafeObserve(() => observer.OnCompensationFailed(step.Name, ex));
+                NotifyCompensationFailed(step.Name, ex);
             }
         }
 
         return failures;
     }
 
-    private static void SafeObserve(Action action)
+    // The four notify helpers below pass the step name (and exception) directly to the observer rather
+    // than through an Action, so the hot path allocates no per-step closure. When no real observer is
+    // registered, hasObserver is false and the call is skipped entirely: the inert null singleton's
+    // callbacks are no-ops, so skipping them is behaviour-identical.
+
+    private void NotifyStepCompleted(string stepName)
     {
+        if (!hasObserver)
+        {
+            return;
+        }
+
         try
         {
-            action();
+            observer.OnStepCompleted(stepName);
+        }
+#pragma warning disable CA1031 // observer is observability, not load-bearing
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            // An observer fault must never disrupt orchestration or rollback.
+        }
+    }
+
+    private void NotifyStepFailed(string stepName, Exception exception)
+    {
+        if (!hasObserver)
+        {
+            return;
+        }
+
+        try
+        {
+            observer.OnStepFailed(stepName, exception);
+        }
+#pragma warning disable CA1031 // observer is observability, not load-bearing
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            // An observer fault must never disrupt orchestration or rollback.
+        }
+    }
+
+    private void NotifyCompensated(string stepName)
+    {
+        if (!hasObserver)
+        {
+            return;
+        }
+
+        try
+        {
+            observer.OnCompensated(stepName);
+        }
+#pragma warning disable CA1031 // observer is observability, not load-bearing
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            // An observer fault must never disrupt orchestration or rollback.
+        }
+    }
+
+    private void NotifyCompensationFailed(string stepName, Exception exception)
+    {
+        if (!hasObserver)
+        {
+            return;
+        }
+
+        try
+        {
+            observer.OnCompensationFailed(stepName, exception);
         }
 #pragma warning disable CA1031 // observer is observability, not load-bearing
         catch (Exception)
