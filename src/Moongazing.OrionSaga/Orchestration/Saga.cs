@@ -41,9 +41,10 @@ public sealed class Saga<TContext>
     /// <param name="cancellationToken">Cancels forward progress (rollback still runs).</param>
     public async Task<SagaResult> RunAsync(TContext context, CancellationToken cancellationToken = default)
     {
-        // Pre-size to the step count: every forward step that completes is pushed, so this is the
-        // exact upper bound and avoids the stack's internal array resizing as steps complete.
-        var completed = new Stack<SagaStep<TContext>>(steps.Count);
+        // Default capacity: the stack grows only as steps complete. Pre-sizing to steps.Count would
+        // eagerly allocate the full backing array, which a saga that fails or is cancelled early over
+        // a large step list never needs, so let it grow to match the steps that actually complete.
+        var completed = new Stack<SagaStep<TContext>>();
 
         foreach (var step in steps)
         {

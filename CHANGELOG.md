@@ -12,10 +12,8 @@ All notable changes to OrionSaga are documented in this file. The format is base
 
 - `Saga.RunAsync` no longer allocates a per-step closure to dispatch observer notifications, and it
   skips the notification path entirely when no observer is registered (the default null observer).
-  The completed-step stack is also pre-sized to the step count to avoid internal resizing. On the
-  no-observer happy path this cuts per-run orchestration allocation substantially (for example, a
-  25-step run drops from roughly 3.1 KB to roughly 0.35 KB). Behaviour, public API, and observer
-  call ordering are unchanged.
+  On the no-observer happy path this cuts per-run orchestration allocation substantially. Behaviour,
+  public API, and observer call ordering are unchanged.
 
 ## [0.2.0] - 2026-06-19
 
