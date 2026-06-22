@@ -1,5 +1,7 @@
 namespace Moongazing.OrionSaga.Orchestration;
 
+using System.Diagnostics;
+
 using Moongazing.OrionSaga.Diagnostics;
 using Moongazing.OrionSaga.Observers;
 
@@ -46,14 +48,27 @@ public sealed class Saga<TContext>
         // a large step list never needs, so let it grow to match the steps that actually complete.
         var completed = new Stack<SagaStep<TContext>>();
 
+        // One-based position of the step about to run. Tracked as a plain local so the ordinal carried
+        // to the observer costs nothing beyond an int increment, and nothing at all when no observer is
+        // registered (the value is simply never read).
+        var ordinal = 0;
+
         foreach (var step in steps)
         {
+            ordinal++;
+
+            // Only measure forward-action duration when a real observer will consume it. The timing
+            // source is allocation-free (a struct timestamp, no Stopwatch object), and gating it on
+            // hasObserver keeps the no-observer happy path byte-for-byte as it was: no timestamp read,
+            // no duration computed.
+            var startTimestamp = hasObserver ? Stopwatch.GetTimestamp() : 0L;
+
             try
             {
                 await ExecuteStep(step, context, cancellationToken).ConfigureAwait(false);
                 completed.Push(step);
                 diagnostics?.RecordStep(completed: true);
-                NotifyStepCompleted(step.Name);
+                NotifyStepCompleted(step.Name, ordinal, startTimestamp);
             }
             catch (OperationCanceledException ex)
             {
@@ -65,28 +80,33 @@ public sealed class Saga<TContext>
                 // unrelated reasons (its own HttpClient timeout, a child token it cancels itself) while
                 // the deadline never fired is not misreported as a timeout.
                 var timedOut = ex is SagaStepTimeoutException;
+                var completedCount = completed.Count;
                 diagnostics?.RecordStep(completed: false);
-                NotifyStepFailed(step.Name, ex);
+                NotifyStepFailed(step.Name, ex, ordinal, startTimestamp);
 
-                var cancelFailures = await CompensateAsync(completed, context).ConfigureAwait(false);
+                var (cancelFailures, compensatedCount) = await CompensateAsync(completed, context).ConfigureAwait(false);
                 diagnostics?.RecordRun(succeeded: false);
-                return SagaResult.CreateCancelled(step.Name, ex, timedOut, cancelFailures);
+                return SagaResult.CreateCancelled(
+                    step.Name, ex, timedOut, completedCount, compensatedCount, cancelFailures);
             }
 #pragma warning disable CA1031 // a saga turns ANY step failure into a compensating rollback
             catch (Exception ex)
 #pragma warning restore CA1031
             {
+                var completedCount = completed.Count;
                 diagnostics?.RecordStep(completed: false);
-                NotifyStepFailed(step.Name, ex);
+                NotifyStepFailed(step.Name, ex, ordinal, startTimestamp);
 
-                var compensationFailures = await CompensateAsync(completed, context).ConfigureAwait(false);
+                var (compensationFailures, compensatedCount) =
+                    await CompensateAsync(completed, context).ConfigureAwait(false);
                 diagnostics?.RecordRun(succeeded: false);
-                return SagaResult.CreateFailed(step.Name, ex, compensationFailures);
+                return SagaResult.CreateFailed(
+                    step.Name, ex, completedCount, compensatedCount, compensationFailures);
             }
         }
 
         diagnostics?.RecordRun(succeeded: true);
-        return SagaResult.Success;
+        return SagaResult.CreateSuccess(completed.Count);
     }
 
     private static async Task ExecuteStep(SagaStep<TContext> step, TContext context, CancellationToken cancellationToken)
@@ -122,20 +142,28 @@ public sealed class Saga<TContext>
     private static bool TimeoutDeadlineFired(CancellationTokenSource timeoutCts, CancellationToken callerToken)
         => timeoutCts.IsCancellationRequested && !callerToken.IsCancellationRequested;
 
-    private async Task<IReadOnlyList<CompensationFailure>> CompensateAsync(
+    private async Task<(IReadOnlyList<CompensationFailure> Failures, int Compensated)> CompensateAsync(
         Stack<SagaStep<TContext>> completed, TContext context)
     {
         var failures = new List<CompensationFailure>();
+        var compensated = 0;
+
+        // Steps unwind newest-first; the ordinal carried to the observer is each step's original
+        // forward position, so a compensation notification can be correlated to the forward step that
+        // produced it. Starting at completed.Count and decrementing tracks that position as we pop.
+        var ordinal = completed.Count;
 
         while (completed.Count > 0)
         {
             var step = completed.Pop();
+            var startTimestamp = hasObserver ? Stopwatch.GetTimestamp() : 0L;
             try
             {
                 // Roll back with a non-cancelled token: a cancelled saga must still undo its work.
                 await step.Compensate(context, CancellationToken.None).ConfigureAwait(false);
+                compensated++;
                 diagnostics?.RecordCompensation(compensated: true);
-                NotifyCompensated(step.Name);
+                NotifyCompensated(step.Name, ordinal, startTimestamp);
             }
 #pragma warning disable CA1031 // record a compensation fault but keep rolling back the remaining steps
             catch (Exception ex)
@@ -143,19 +171,21 @@ public sealed class Saga<TContext>
             {
                 failures.Add(new CompensationFailure(step.Name, ex));
                 diagnostics?.RecordCompensation(compensated: false);
-                NotifyCompensationFailed(step.Name, ex);
+                NotifyCompensationFailed(step.Name, ex, ordinal, startTimestamp);
             }
+
+            ordinal--;
         }
 
-        return failures;
+        return (failures, compensated);
     }
 
-    // The four notify helpers below pass the step name (and exception) directly to the observer rather
-    // than through an Action, so the hot path allocates no per-step closure. When no real observer is
-    // registered, hasObserver is false and the call is skipped entirely: the inert null singleton's
-    // callbacks are no-ops, so skipping them is behaviour-identical.
+    // The four notify helpers below pass the step name, ordinal, and duration directly to the observer
+    // rather than through an Action, so the hot path allocates no per-step closure. When no real
+    // observer is registered, hasObserver is false and the call is skipped entirely (and no timestamp
+    // was captured), so the no-observer path pays nothing for the richer payload.
 
-    private void NotifyStepCompleted(string stepName)
+    private void NotifyStepCompleted(string stepName, int ordinal, long startTimestamp)
     {
         if (!hasObserver)
         {
@@ -164,7 +194,7 @@ public sealed class Saga<TContext>
 
         try
         {
-            observer.OnStepCompleted(stepName);
+            observer.OnStepCompleted(stepName, ordinal, Stopwatch.GetElapsedTime(startTimestamp));
         }
 #pragma warning disable CA1031 // observer is observability, not load-bearing
         catch (Exception)
@@ -174,7 +204,7 @@ public sealed class Saga<TContext>
         }
     }
 
-    private void NotifyStepFailed(string stepName, Exception exception)
+    private void NotifyStepFailed(string stepName, Exception exception, int ordinal, long startTimestamp)
     {
         if (!hasObserver)
         {
@@ -183,7 +213,7 @@ public sealed class Saga<TContext>
 
         try
         {
-            observer.OnStepFailed(stepName, exception);
+            observer.OnStepFailed(stepName, exception, ordinal, Stopwatch.GetElapsedTime(startTimestamp));
         }
 #pragma warning disable CA1031 // observer is observability, not load-bearing
         catch (Exception)
@@ -193,7 +223,7 @@ public sealed class Saga<TContext>
         }
     }
 
-    private void NotifyCompensated(string stepName)
+    private void NotifyCompensated(string stepName, int ordinal, long startTimestamp)
     {
         if (!hasObserver)
         {
@@ -202,7 +232,7 @@ public sealed class Saga<TContext>
 
         try
         {
-            observer.OnCompensated(stepName);
+            observer.OnCompensated(stepName, ordinal, Stopwatch.GetElapsedTime(startTimestamp));
         }
 #pragma warning disable CA1031 // observer is observability, not load-bearing
         catch (Exception)
@@ -212,7 +242,7 @@ public sealed class Saga<TContext>
         }
     }
 
-    private void NotifyCompensationFailed(string stepName, Exception exception)
+    private void NotifyCompensationFailed(string stepName, Exception exception, int ordinal, long startTimestamp)
     {
         if (!hasObserver)
         {
@@ -221,7 +251,7 @@ public sealed class Saga<TContext>
 
         try
         {
-            observer.OnCompensationFailed(stepName, exception);
+            observer.OnCompensationFailed(stepName, exception, ordinal, Stopwatch.GetElapsedTime(startTimestamp));
         }
 #pragma warning disable CA1031 // observer is observability, not load-bearing
         catch (Exception)

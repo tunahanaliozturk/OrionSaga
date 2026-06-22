@@ -2,7 +2,7 @@
 
 Where OrionSaga has been and where it might go next.
 
-Current release: **0.2.1**. An in-process saga orchestrator that runs an ordered set of steps over a
+Current release: **0.3.0**. An in-process saga orchestrator that runs an ordered set of steps over a
 shared context and compensates the completed steps in reverse order when one fails, cancels, or
 overruns its timeout.
 
@@ -11,7 +11,7 @@ forward plan is a direction with rough version targets, not a contract: items mo
 dropped as real usage shows what matters. If you want something here, open an issue and describe the
 workload that needs it; demand is what moves an idea forward.
 
-For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0 and 0.2.1 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
+For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, and 0.3.0 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
 
 ---
 
@@ -34,6 +34,25 @@ unwind them cleanly when one fails. Any addition is weighed against that focus.
 ## Released
 
 What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the full history.
+
+### 0.3.0
+
+- **Typed step results.** A new generic `SagaBuilder.AddResultStep<TResult>` method takes a forward
+  action that returns a value plus an `apply` callback that writes that value into the shared context,
+  so a step hands its result to the next step instead of mutating shared state by hand. The typed step
+  is adapted onto the existing untyped step, so ordering, compensation, per-step timeouts, and
+  reporting are identical. It is a distinct method, not an `AddStep` overload, so it cannot capture an
+  existing `AddStep` call. The untyped `AddStep`, `SagaStep`, and `SagaBuilder` surface is unchanged.
+- **Run-level summary on `SagaResult`.** New `StepsCompleted` and `StepsCompensated` counts report how
+  many forward actions completed and how many completed steps compensated cleanly, so callers do not
+  reconstruct them from an observer. The step that ends the saga is not counted as completed, and a
+  compensation that itself threw is recorded in `CompensationFailures` rather than counted as
+  compensated.
+- **Richer observer payloads.** `ISagaObserver` gains overloads that carry each step's one-based
+  ordinal and measured duration alongside the name. They are default interface methods that forward to
+  the original name-only methods, so an existing observer is unaffected; override an overload to
+  receive the ordinal and duration. The no-observer happy path stays allocation-light: with no observer
+  registered the executor captures no timing and makes no notification call.
 
 ### 0.2.1
 
@@ -70,18 +89,6 @@ What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the fu
 
 A rough plan with version targets. Dates are estimates, not commitments, and earlier items gate later
 ones.
-
-### 0.3.x: typed step results and richer reporting
-
-- **Typed step results.** Let a step return a value that flows into the context or the next step,
-  rather than mutating shared state by hand. The most-requested ergonomic gap and the anchor of this
-  line.
-- **Run-level summary on `SagaResult`.** Surface counts (steps completed, steps compensated) so callers
-  do not reconstruct them from an observer.
-- **Richer observer payloads.** Pass step duration and ordinal alongside the name, so an observer can
-  build a timing breakdown without its own bookkeeping.
-
-Target: around Q3 2026.
 
 ### 0.4.x: per-step resilience
 
