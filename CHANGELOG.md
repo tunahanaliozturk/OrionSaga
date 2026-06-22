@@ -10,12 +10,15 @@ All notable changes to OrionSaga are documented in this file. The format is base
 
 ### Added
 
-- Typed step results: a new generic `SagaBuilder.AddStep<TResult>` overload takes a forward action
-  that returns a value plus an `apply` callback that flows the value into the shared context, so a
-  step can hand its result to the next step instead of mutating shared state by hand. The typed step
-  is adapted onto the existing untyped step shape, so ordering, compensation, per-step timeouts, and
-  reporting behave exactly as for an untyped step. The existing `SagaBuilder`, `SagaStep`, and
-  untyped `AddStep` surface is unchanged.
+- Typed step results: a new generic `SagaBuilder.AddResultStep<TResult>` method takes a forward
+  action that returns a value plus an `apply` callback that flows the value into the shared context,
+  so a step can hand its result to the next step instead of mutating shared state by hand. The typed
+  step is adapted onto the existing untyped step shape, so ordering, compensation, per-step timeouts,
+  and reporting behave exactly as for an untyped step. It is intentionally a distinct method rather
+  than an `AddStep` overload: a generic overload could capture an existing
+  `AddStep(name, forward, compensate)` call whose forward returns a `Task<T>` and silently rebind its
+  compensation to `apply`, so the typed surface is kept off the `AddStep` candidate set entirely. The
+  existing `SagaBuilder`, `SagaStep`, and untyped `AddStep` surface is unchanged.
 - Run-level summary on `SagaResult`: new `StepsCompleted` and `StepsCompensated` counts so callers
   can read how many forward actions completed and how many completed steps were compensated cleanly
   without reconstructing them from an observer. On success `StepsCompleted` equals the step count and

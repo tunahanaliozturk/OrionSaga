@@ -168,7 +168,7 @@ so the next step reads it directly instead of the step mutating shared state by 
 
 ```csharp
 var saga = new SagaBuilder<OrderContext>()
-    .AddStep<string>("reserve-stock",
+    .AddResultStep<string>("reserve-stock",
         execute:    (ctx, ct) => inventory.ReserveAsync(ctx.OrderId, ct), // returns a reservation id
         apply:      (ctx, reservationId) => ctx.ReservationId = reservationId,
         compensate: (ctx, ct) => inventory.ReleaseAsync(ctx.ReservationId!, ct))
@@ -178,9 +178,11 @@ var saga = new SagaBuilder<OrderContext>()
 ```
 
 `apply` runs on the forward path immediately after the action; a fault it raises fails the step like
-any other forward fault and triggers rollback. The typed overload is an ergonomic layer over the
-untyped step: ordering, compensation, per-step timeouts, and the `SagaResult` all behave identically,
-and typed and untyped steps mix freely in one saga.
+any other forward fault and triggers rollback. `AddResultStep` is an ergonomic layer over the untyped
+step: ordering, compensation, per-step timeouts, and the `SagaResult` all behave identically, and
+typed and untyped steps mix freely in one saga. It is deliberately a distinct method rather than an
+`AddStep` overload, so an existing `AddStep(name, forward, compensate)` call whose forward happens to
+return a `Task<T>` can never rebind to it and lose its compensation.
 
 ### Cancellation
 
@@ -328,7 +330,7 @@ readonly record struct.
 | Method | Purpose |
 |--------|---------|
 | `AddStep(name, execute, compensate?, timeout?)` | Add a step from a name, a forward action, an optional compensation, and an optional per-step timeout. |
-| `AddStep<TResult>(name, execute, apply, compensate?, timeout?)` | Add a step whose forward action returns a value; `apply` flows that value into the context for the next step. |
+| `AddResultStep<TResult>(name, execute, apply, compensate?, timeout?)` | Add a step whose forward action returns a value; `apply` flows that value into the context for the next step. A distinct name (not an `AddStep` overload) so it can never capture an existing `AddStep` call. |
 | `AddStep(SagaStep<TContext>)` | Add an already-constructed `SagaStep<TContext>`. |
 | `WithObserver(ISagaObserver)` | Attach an observer for progress notifications. |
 | `WithDiagnostics(SagaDiagnostics)` | Attach the metrics meter. |

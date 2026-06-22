@@ -39,6 +39,20 @@ public sealed class SagaBuilder<TContext>
     /// is an ergonomic layer over the untyped step: internally the produced value is applied to the
     /// context, so compensation, ordering, timeout, and reporting behave exactly as for any other step.
     /// </summary>
+    /// <remarks>
+    /// This is deliberately a distinct method, not a generic overload of <see cref="AddStep(string,
+    /// Func{TContext, CancellationToken, Task}, Func{TContext, CancellationToken, Task}?, TimeSpan?)"/>.
+    /// An existing untyped call such as
+    /// <c>AddStep("reserve", (_, _) =&gt; ReserveAsync(), (ctx, _) =&gt; ReleaseAsync(ctx))</c> whose
+    /// forward action happens to return a <see cref="Task{TResult}"/> is convertible to a generic
+    /// <c>AddStep&lt;TResult&gt;</c> candidate as well (the third lambda binds to <paramref name="apply"/>
+    /// because an expression-bodied lambda returning a <see cref="Task"/> is also convertible to an
+    /// <see cref="Action{T1, T2}"/>). Overload resolution could then silently rebind the caller's
+    /// compensation to <paramref name="apply"/>, dropping the compensation and leaving the returned
+    /// <see cref="Task"/> unobserved. Keeping the typed surface under its own name removes it from the
+    /// <c>AddStep</c> candidate set entirely, so no existing <c>AddStep</c> call can ever rebind to it.
+    /// Do not collapse this back into an <c>AddStep</c> overload.
+    /// </remarks>
     /// <typeparam name="TResult">The type the forward action produces.</typeparam>
     /// <param name="name">The step name.</param>
     /// <param name="execute">The forward action, producing a value.</param>
@@ -57,7 +71,7 @@ public sealed class SagaBuilder<TContext>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="execute"/> or <paramref name="apply"/> is null.
     /// </exception>
-    public SagaBuilder<TContext> AddStep<TResult>(
+    public SagaBuilder<TContext> AddResultStep<TResult>(
         string name,
         Func<TContext, CancellationToken, Task<TResult>> execute,
         Action<TContext, TResult> apply,

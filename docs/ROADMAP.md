@@ -37,11 +37,12 @@ What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the fu
 
 ### 0.3.0
 
-- **Typed step results.** A new generic `SagaBuilder.AddStep<TResult>` overload takes a forward action
-  that returns a value plus an `apply` callback that writes that value into the shared context, so a
-  step hands its result to the next step instead of mutating shared state by hand. The typed step is
-  adapted onto the existing untyped step, so ordering, compensation, per-step timeouts, and reporting
-  are identical. The untyped `AddStep`, `SagaStep`, and `SagaBuilder` surface is unchanged.
+- **Typed step results.** A new generic `SagaBuilder.AddResultStep<TResult>` method takes a forward
+  action that returns a value plus an `apply` callback that writes that value into the shared context,
+  so a step hands its result to the next step instead of mutating shared state by hand. The typed step
+  is adapted onto the existing untyped step, so ordering, compensation, per-step timeouts, and
+  reporting are identical. It is a distinct method, not an `AddStep` overload, so it cannot capture an
+  existing `AddStep` call. The untyped `AddStep`, `SagaStep`, and `SagaBuilder` surface is unchanged.
 - **Run-level summary on `SagaResult`.** New `StepsCompleted` and `StepsCompensated` counts report how
   many forward actions completed and how many completed steps compensated cleanly, so callers do not
   reconstruct them from an observer. The step that ends the saga is not counted as completed, and a
