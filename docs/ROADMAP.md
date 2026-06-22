@@ -11,7 +11,7 @@ forward plan is a direction with rough version targets, not a contract: items mo
 dropped as real usage shows what matters. If you want something here, open an issue and describe the
 workload that needs it; demand is what moves an idea forward.
 
-For the full capability list as it stands today, see [FEATURES.md](FEATURES.md).
+For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0 and 0.2.1 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
 
 ---
 
@@ -46,9 +46,12 @@ What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the fu
 
 - **Per-step timeouts.** A step can declare a maximum forward-action duration via the `timeout`
   parameter on `SagaBuilder.AddStep` and the `SagaStep` constructor (`SagaStep.Timeout`). When a step
-  overruns its budget it is cancelled and the saga rolls back the completed steps, reporting the
-  timeout as the cause. The deadline is honoured alongside any caller-supplied `CancellationToken`
-  through a linked token, so external cancellation still works.
+  overruns its budget the linked `CancellationToken` is cancelled; a step that observes the token stops
+  and the saga rolls back the completed steps, reporting the timeout as the cause. The cancellation is
+  cooperative, not a hard kill: a step action that ignores its `CancellationToken` can run past the
+  deadline, so step bodies must honour the token to get the timeout guarantee. The deadline is honoured
+  alongside any caller-supplied `CancellationToken` through that linked token, so external cancellation
+  still works.
 - **Distinct cancellation outcome.** A cancellation (caller token or per-step timeout) is reported as
   `SagaOutcome.Cancelled`, separate from a business `Failed` and from `TimedOut`, so callers can tell
   an operator or timeout cancellation apart from a step that genuinely faulted. Exposed through the new
