@@ -32,6 +32,45 @@ public sealed class SagaBuilder<TContext>
         return this;
     }
 
+    /// <summary>
+    /// Add a step whose forward action returns a value, flowing that value into the context for the
+    /// next step instead of having the step mutate shared state by hand. The forward action produces a
+    /// <typeparamref name="TResult"/>; <paramref name="apply"/> then writes it into the context. This
+    /// is an ergonomic layer over the untyped step: internally the produced value is applied to the
+    /// context, so compensation, ordering, timeout, and reporting behave exactly as for any other step.
+    /// </summary>
+    /// <typeparam name="TResult">The type the forward action produces.</typeparam>
+    /// <param name="name">The step name.</param>
+    /// <param name="execute">The forward action, producing a value.</param>
+    /// <param name="apply">
+    /// Writes the produced value into the context so later steps can read it. Runs immediately after
+    /// the forward action, on the same forward path; a fault it raises fails the step like any other
+    /// forward fault and triggers rollback of the prior steps.
+    /// </param>
+    /// <param name="compensate">The compensating action; a no-op when null.</param>
+    /// <param name="timeout">
+    /// An optional maximum duration for the forward action. When it overruns, the step is cancelled
+    /// and the saga rolls back, reporting the timeout. Null means no budget. Must be positive when set.
+    /// The budget covers the forward action only; <paramref name="apply"/> is expected to be a cheap,
+    /// synchronous assignment.
+    /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="execute"/> or <paramref name="apply"/> is null.
+    /// </exception>
+    public SagaBuilder<TContext> AddStep<TResult>(
+        string name,
+        Func<TContext, CancellationToken, Task<TResult>> execute,
+        Action<TContext, TResult> apply,
+        Func<TContext, CancellationToken, Task>? compensate = null,
+        TimeSpan? timeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(execute);
+        ArgumentNullException.ThrowIfNull(apply);
+
+        steps.Add(new SagaStep<TContext>(name, Adapt(execute, apply), compensate, timeout));
+        return this;
+    }
+
     /// <summary>Add an already-constructed step.</summary>
     /// <param name="step">The step.</param>
     public SagaBuilder<TContext> AddStep(SagaStep<TContext> step)
@@ -59,4 +98,16 @@ public sealed class SagaBuilder<TContext>
 
     /// <summary>Build the runnable saga.</summary>
     public Saga<TContext> Build() => new(steps.ToArray(), diagnostics, observer);
+
+    // Fold the typed forward action and its apply step into the single untyped delegate shape the
+    // executor already runs. The value the forward action produces is handed to apply, which lands it
+    // in the context; the executor never sees the result type, so the typed path adds no hot-path cost.
+    private static Func<TContext, CancellationToken, Task> Adapt<TResult>(
+        Func<TContext, CancellationToken, Task<TResult>> execute,
+        Action<TContext, TResult> apply) =>
+        async (context, cancellationToken) =>
+        {
+            var result = await execute(context, cancellationToken).ConfigureAwait(false);
+            apply(context, result);
+        };
 }

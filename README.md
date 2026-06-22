@@ -161,6 +161,27 @@ var saga = new SagaBuilder<OrderContext>()
 
 A missing compensation is treated as a no-op during rollback.
 
+### Typed step results
+
+A step's forward action can return a value, with an `apply` callback that writes it into the context
+so the next step reads it directly instead of the step mutating shared state by hand:
+
+```csharp
+var saga = new SagaBuilder<OrderContext>()
+    .AddStep<string>("reserve-stock",
+        execute:    (ctx, ct) => inventory.ReserveAsync(ctx.OrderId, ct), // returns a reservation id
+        apply:      (ctx, reservationId) => ctx.ReservationId = reservationId,
+        compensate: (ctx, ct) => inventory.ReleaseAsync(ctx.ReservationId!, ct))
+    .AddStep("charge-card",
+        (ctx, ct) => payments.ChargeAsync(ctx.ReservationId!, ctx.Amount, ct)) // reads what reserve produced
+    .Build();
+```
+
+`apply` runs on the forward path immediately after the action; a fault it raises fails the step like
+any other forward fault and triggers rollback. The typed overload is an ergonomic layer over the
+untyped step: ordering, compensation, per-step timeouts, and the `SagaResult` all behave identically,
+and typed and untyped steps mix freely in one saga.
+
 ### Cancellation
 
 `RunAsync` takes a `CancellationToken` that cancels *forward* progress. A cancellation is reported as
@@ -243,6 +264,20 @@ var saga = new SagaBuilder<OrderContext>()
     .Build();
 ```
 
+Each notification also has a richer overload that carries the step's one-based ordinal and measured
+duration, so an observer can build a timing breakdown without its own bookkeeping:
+
+```csharp
+public void OnStepCompleted(string stepName, int ordinal, TimeSpan duration) =>
+    logger.LogInformation("Step {Ordinal} {Step} completed in {Elapsed}", ordinal, stepName, duration);
+```
+
+The richer overloads are default interface methods that forward to the name-only methods, so an
+existing observer keeps working unchanged; override an overload to receive the ordinal and duration.
+A compensation notification carries the step's original forward ordinal, so it correlates to the
+forward step that produced it. When no observer is registered the executor captures no timing and
+skips the notification entirely, so the no-observer path stays allocation-light.
+
 ### Diagnostics
 
 Attach a `SagaDiagnostics` instance to emit metrics. See [Telemetry](#telemetry) below.
@@ -262,6 +297,8 @@ Attach a `SagaDiagnostics` instance to emit metrics. See [Telemetry](#telemetry)
 | `TimedOut` | True when the cancellation was caused by a step exceeding its per-step timeout. Always false unless `Cancelled` is true. |
 | `FailedStep` | The name of the step that ended the saga, or null on success. |
 | `Failure` | The exception that ended the saga, or null on success. For a cancellation this is the observed `OperationCanceledException`. |
+| `StepsCompleted` | How many forward actions completed. Equals the step count on success; the step that ended the saga is not counted. |
+| `StepsCompensated` | How many completed steps compensated cleanly during rollback. Zero on success. A compensation that threw is in `CompensationFailures`, not counted here. |
 | `CompensationFailures` | Compensations that themselves threw during rollback. Empty on success or a clean rollback. |
 | `RolledBackCleanly` | True when the saga did not succeed but every completed step compensated cleanly. |
 
@@ -291,6 +328,7 @@ readonly record struct.
 | Method | Purpose |
 |--------|---------|
 | `AddStep(name, execute, compensate?, timeout?)` | Add a step from a name, a forward action, an optional compensation, and an optional per-step timeout. |
+| `AddStep<TResult>(name, execute, apply, compensate?, timeout?)` | Add a step whose forward action returns a value; `apply` flows that value into the context for the next step. |
 | `AddStep(SagaStep<TContext>)` | Add an already-constructed `SagaStep<TContext>`. |
 | `WithObserver(ISagaObserver)` | Attach an observer for progress notifications. |
 | `WithDiagnostics(SagaDiagnostics)` | Attach the metrics meter. |
@@ -422,7 +460,7 @@ OrionSaga follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Th
 changes to that surface come with a major version bump. See [CHANGELOG.md](CHANGELOG.md) for the
 release history.
 
-The library is currently at **0.2.0**: the API is young and may still change ahead of a 1.0.
+The library is currently at **0.3.0**: the API is young and may still change ahead of a 1.0.
 
 ---
 
