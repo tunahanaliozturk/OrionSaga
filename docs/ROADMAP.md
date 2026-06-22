@@ -1,13 +1,17 @@
 # OrionSaga Roadmap
 
-Where OrionSaga might go, and how you can help shape it.
+Where OrionSaga has been and where it might go next.
 
-This document is a set of **ideas under consideration, not promises**. Nothing here has a committed
-date or release number. Items move, merge, and get dropped as real usage shows what matters. If you
-want something here, open an issue and describe the workload that needs it; demand is what moves an
-idea forward.
+Current release: **0.2.1**. An in-process saga orchestrator that runs an ordered set of steps over a
+shared context and compensates the completed steps in reverse order when one fails, cancels, or
+overruns its timeout.
 
-For what already ships today, see [FEATURES.md](FEATURES.md).
+This document records what has shipped and lays out a forward plan. The shipped section is fact. The
+forward plan is a direction with rough version targets, not a contract: items move, merge, and get
+dropped as real usage shows what matters. If you want something here, open an issue and describe the
+workload that needs it; demand is what moves an idea forward.
+
+For the full capability list as it stands today, see [FEATURES.md](FEATURES.md).
 
 ---
 
@@ -16,67 +20,126 @@ For what already ships today, see [FEATURES.md](FEATURES.md).
 OrionSaga is deliberately small. It is an in-process orchestrator with one job: run a few steps and
 unwind them cleanly when one fails. Any addition is weighed against that focus.
 
-1. **Stay dependency-light.** The library leans on nothing but the DI abstractions today. New
-   features that pull in heavy dependencies belong in optional companion packages, not the core.
+1. **Stay dependency-light.** The core leans on nothing but the DI abstractions. Features that pull in
+   heavy dependencies belong in optional companion packages, not the core.
 2. **Do not pretend to be a durable workflow engine.** OrionSaga coordinates one operation inside one
    process. Durable, resumable, cross-process workflow is a different product with different
-   trade-offs, and conflating the two would hurt both.
+   trade-offs, and conflating the two would hurt both. Where durability is explored below it is scoped
+   as an opt-in store behind a seam, never baked into the in-process executor.
 3. **Keep the happy path allocation-light.** The forward run is the part consumers pay for on every
    call; instrumentation and ergonomics must not tax it.
 
 ---
 
-## Ideas under consideration
+## Released
 
-These are grouped by theme. Order does not imply priority.
+What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the full history.
 
-### Ergonomics
+### 0.2.1
 
-- **Typed step results.** Let a step return a value that flows into the context or the next step,
-  rather than mutating shared state by hand.
-- **Step grouping / sub-sagas.** Compose a saga out of smaller named sagas so a complex flow reads as
-  a few stages rather than one long list.
-- **Conditional steps.** A first-class way to skip a step based on the context, instead of branching
-  inside the forward delegate.
+- **Allocation-light notifications.** `Saga.RunAsync` no longer allocates a per-step closure to
+  dispatch observer notifications, and it skips the notification path entirely when no observer is
+  registered. On the no-observer happy path this cuts per-run orchestration allocation substantially.
+  Behaviour, public API, and observer call ordering are unchanged.
 
-### Observability
+### 0.2.0
 
-- **Richer observer payloads.** Pass step duration and ordinal alongside the name, so an observer can
-  build timing breakdowns without its own bookkeeping.
-- **Activity / tracing integration.** Emit a `System.Diagnostics.Activity` span per saga run and per
-  step so traces show the orchestration shape next to the existing meter counters.
-- **A run-level summary on `SagaResult`.** Surface counts (steps completed, compensated) so callers
-  do not have to reconstruct them from an observer.
+- **Per-step timeouts.** A step can declare a maximum forward-action duration via the `timeout`
+  parameter on `SagaBuilder.AddStep` and the `SagaStep` constructor (`SagaStep.Timeout`). When a step
+  overruns its budget it is cancelled and the saga rolls back the completed steps, reporting the
+  timeout as the cause. The deadline is honoured alongside any caller-supplied `CancellationToken`
+  through a linked token, so external cancellation still works.
+- **Distinct cancellation outcome.** A cancellation (caller token or per-step timeout) is reported as
+  `SagaOutcome.Cancelled`, separate from a business `Failed` and from `TimedOut`, so callers can tell
+  an operator or timeout cancellation apart from a step that genuinely faulted. Exposed through the new
+  `SagaOutcome` enum and `SagaResult.Outcome`, with `Cancelled`, `Failed`, and `TimedOut` convenience
+  properties.
 
-### Resilience
+### 0.1.0
 
-- **Per-step retry policies.** An opt-in retry-with-backoff around a forward action before it is
-  treated as a failure, for transient faults.
-- **Compensation retry.** The same idea for compensations, since a failed undo is the most expensive
-  outcome.
-- **Configurable cancellation budget for rollback.** Today rollback uses a non-cancelled token; a
-  bounded timeout for the unwind is worth exploring.
-
-### Testing support
-
-- **A test helper package.** Recording observers and assertion helpers for verifying step and
-  compensation order without hand-rolling them in each test.
+- Initial release: ordered steps with paired compensations, automatic reverse compensation on
+  failure, `SagaResult` reporting, the `ISagaObserver` hook, `SagaDiagnostics` counters, and the
+  `AddOrionSaga()` DI extension.
 
 ---
 
-## Explicitly out of scope (for now)
+## Next
 
-These come up often and are deliberately *not* planned, to keep the library honest about what it is:
+A rough plan with version targets. Dates are estimates, not commitments, and earlier items gate later
+ones.
 
-- **Durable / persisted sagas** that survive a process restart. This is the defining boundary of the
-  library. If you need resumable workflow, a dedicated engine is the right tool.
+### 0.3.x: typed step results and richer reporting
+
+- **Typed step results.** Let a step return a value that flows into the context or the next step,
+  rather than mutating shared state by hand. The most-requested ergonomic gap and the anchor of this
+  line.
+- **Run-level summary on `SagaResult`.** Surface counts (steps completed, steps compensated) so callers
+  do not reconstruct them from an observer.
+- **Richer observer payloads.** Pass step duration and ordinal alongside the name, so an observer can
+  build a timing breakdown without its own bookkeeping.
+
+Target: around Q3 2026.
+
+### 0.4.x: per-step resilience
+
+- **Per-step retry policies.** An opt-in retry-with-backoff around a forward action before it is
+  treated as a failure, for transient faults. Declared per step so a flaky call does not force a full
+  rollback.
+- **Compensation retry.** The same idea for compensations, since a failed undo is the most expensive
+  outcome.
+- **Configurable rollback budget.** Today rollback runs with a non-cancelled token; a bounded timeout
+  for the unwind, so a hung compensation cannot block forever.
+
+Target: around Q4 2026.
+
+### 0.5.x: composition and control flow
+
+- **Conditional steps.** A first-class way to skip a step based on the context, instead of branching
+  inside the forward delegate.
+- **Step grouping / sub-sagas.** Compose a saga from smaller named sagas so a complex flow reads as a
+  few stages rather than one long list.
+- **Parallel step groups.** Run a set of independent steps concurrently within one stage, with
+  compensation still unwinding every completed step in the group on failure. Strictly opt-in; the
+  default stays sequential.
+
+Target: around Q1 2027.
+
+### Observability and tooling, alongside the above
+
+- **Activity / tracing integration.** Emit a `System.Diagnostics.Activity` span per saga run and per
+  step so traces show the orchestration shape next to the existing meter counters.
+- **Saga-state inspection.** A read-only view of a run in progress (current step, completed steps,
+  what would compensate) for diagnostics and tests, without exposing mutable internals.
+- **Test helper package.** Recording observers and assertion helpers for verifying step and
+  compensation order without hand-rolling them in each test.
+
+### Companion packages (opt-in, outside the core)
+
+These extend OrionSaga without adding dependencies to the in-process core. Each would ship as a
+separate package and is gated on clear demand.
+
+- **Reliable side effects via an outbox.** Bridge a saga's effects to a transactional outbox so a
+  step's external message is published in the same transaction as its local state change, using
+  [OrionPatch](https://github.com/tunahanaliozturk/OrionPatch) as the outbox.
+- **Durable saga store.** An optional persistence seam that records step progress so a crashed run can
+  be inspected and, where steps are idempotent, resumed. This does not turn the core into a workflow
+  engine: the executor stays in-process and the store is an opt-in adapter behind an interface. This
+  is the boundary case, and it only moves with concrete, described demand.
+
+---
+
+## Explicitly out of scope
+
+These come up often and are deliberately not planned for the core, to keep the library honest about
+what it is:
+
+- **A durable workflow engine baked into the core.** Persistence, if it lands, is an opt-in companion
+  behind a seam (see above), never a requirement of the in-process executor.
 - **Distributed, cross-service sagas** coordinated over a message broker. OrionSaga is in-process.
 - **A scheduler or background host.** OrionSaga runs when you call `RunAsync`; it owns no threads of
   its own.
 
-If your use case needs one of these, that is useful signal. Open an issue and describe it. It will
-not change the in-process core, but it helps map where the boundary should sit and whether a separate
-companion package makes sense.
+If your use case needs one of these, that is useful signal. Open an issue and describe it.
 
 ---
 
@@ -86,4 +149,3 @@ companion package makes sense.
   need X" is far more actionable than "please add X".
 - Real demand reorders this list. A clear, common need beats a clever but speculative one.
 - Small, focused pull requests that fit the principles above are welcome.
-</content>
