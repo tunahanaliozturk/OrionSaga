@@ -37,6 +37,7 @@ public sealed class SagaResult
         bool timedOut,
         int stepsCompleted,
         int stepsCompensated,
+        int stepsSkipped,
         IReadOnlyList<CompensationFailure> compensationFailures,
         bool rollbackTimedOut)
     {
@@ -46,6 +47,7 @@ public sealed class SagaResult
         TimedOut = timedOut;
         StepsCompleted = stepsCompleted;
         StepsCompensated = stepsCompensated;
+        StepsSkipped = stepsSkipped;
         CompensationFailures = compensationFailures;
         RollbackTimedOut = rollbackTimedOut;
     }
@@ -76,18 +78,29 @@ public sealed class SagaResult
     /// How many step forward actions completed. On success this equals the number of steps in the
     /// saga. On a failure, cancellation, or timeout it is the count of steps that completed before the
     /// run ended; the step that ended the saga is not counted, since its forward action did not
-    /// complete.
+    /// complete. A parallel group counts as one completed step (one stage), regardless of how many
+    /// members it ran; its members are reflected individually in <see cref="StepsCompensated"/> when the
+    /// group is rolled back.
     /// </summary>
     public int StepsCompleted { get; }
 
     /// <summary>
-    /// How many completed steps were compensated cleanly during rollback. Always zero on success,
-    /// because a successful run rolls nothing back. A compensation that itself threw is recorded in
-    /// <see cref="CompensationFailures"/> and is not counted here, so
-    /// <see cref="StepsCompensated"/> plus <see cref="CompensationFailures"/> count equals the number
-    /// of completed steps that rollback attempted to undo.
+    /// How many completed compensations ran cleanly during rollback. Always zero on success, because a
+    /// successful run rolls nothing back. A compensation that itself threw is recorded in
+    /// <see cref="CompensationFailures"/> and is not counted here, so <see cref="StepsCompensated"/> plus
+    /// <see cref="CompensationFailures"/> count equals the number of compensations rollback attempted.
+    /// Each completed parallel group member that rollback unwinds is counted individually here, since the
+    /// group's members compensate through the same per-step routine as sequential steps; a rolled-back
+    /// group therefore contributes one count per completed member, not one for the group as a whole.
     /// </summary>
     public int StepsCompensated { get; }
+
+    /// <summary>
+    /// How many steps were skipped because their condition evaluated false. A skipped step's forward
+    /// action did not run and it was not compensated, so it counts toward neither
+    /// <see cref="StepsCompleted"/> nor <see cref="StepsCompensated"/>.
+    /// </summary>
+    public int StepsSkipped { get; }
 
     /// <summary>The name of the step that ended the saga, or null on success.</summary>
     public string? FailedStep { get; }
@@ -127,11 +140,12 @@ public sealed class SagaResult
             timedOut: false,
             stepsCompleted: 0,
             stepsCompensated: 0,
+            stepsSkipped: 0,
             [],
             rollbackTimedOut: false);
 
-    internal static SagaResult CreateSuccess(int stepsCompleted) =>
-        stepsCompleted == 0
+    internal static SagaResult CreateSuccess(int stepsCompleted, int stepsSkipped) =>
+        stepsCompleted == 0 && stepsSkipped == 0
             ? Success
             : new(
                 SagaOutcome.Succeeded,
@@ -140,6 +154,7 @@ public sealed class SagaResult
                 timedOut: false,
                 stepsCompleted,
                 stepsCompensated: 0,
+                stepsSkipped,
                 [],
                 rollbackTimedOut: false);
 
@@ -148,6 +163,7 @@ public sealed class SagaResult
         Exception failure,
         int stepsCompleted,
         int stepsCompensated,
+        int stepsSkipped,
         IReadOnlyList<CompensationFailure> compensationFailures,
         bool rollbackTimedOut) =>
         new(
@@ -157,6 +173,7 @@ public sealed class SagaResult
             timedOut: false,
             stepsCompleted,
             stepsCompensated,
+            stepsSkipped,
             compensationFailures,
             rollbackTimedOut);
 
@@ -166,6 +183,7 @@ public sealed class SagaResult
         bool timedOut,
         int stepsCompleted,
         int stepsCompensated,
+        int stepsSkipped,
         IReadOnlyList<CompensationFailure> compensationFailures,
         bool rollbackTimedOut) =>
         new(
@@ -175,6 +193,7 @@ public sealed class SagaResult
             timedOut,
             stepsCompleted,
             stepsCompensated,
+            stepsSkipped,
             compensationFailures,
             rollbackTimedOut);
 }

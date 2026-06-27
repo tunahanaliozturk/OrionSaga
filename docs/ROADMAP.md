@@ -2,16 +2,17 @@
 
 Where OrionSaga has been and where it might go next.
 
-Current release: **0.4.0**. An in-process saga orchestrator that runs an ordered set of steps over a
+Current release: **0.5.0**. An in-process saga orchestrator that runs an ordered set of steps over a
 shared context and compensates the completed steps in reverse order when one fails, cancels, or
-overruns its timeout, with opt-in per-step retry, compensation retry, and a bounded rollback budget.
+overruns its timeout, with opt-in per-step retry, compensation retry, a bounded rollback budget, and
+composition and control flow: conditional steps, sub-sagas, and parallel step groups.
 
 This document records what has shipped and lays out a forward plan. The shipped section is fact. The
 forward plan is a direction with rough version targets, not a contract: items move, merge, and get
 dropped as real usage shows what matters. If you want something here, open an issue and describe the
 workload that needs it; demand is what moves an idea forward.
 
-For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, 0.3.0, and 0.4.0 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
+For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, 0.3.0, 0.4.0, and 0.5.0 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
 
 ---
 
@@ -34,6 +35,35 @@ unwind them cleanly when one fails. Any addition is weighed against that focus.
 ## Released
 
 What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the full history.
+
+### 0.5.0
+
+- **Conditional steps.** A step can declare a `condition` predicate (via `AddConditionalStep` /
+  `AddConditionalResultStep` / `SagaStep`, exposed as `SagaStep.Condition`). When it evaluates false
+  against the context just before the step would run, the step is skipped: its forward action does not
+  run, it is not counted as completed, and it is never compensated; a predicate that throws is treated
+  like a forward fault and rolls back the completed steps. This replaces branching inside the forward
+  delegate, so a skip is visible in `SagaResult.StepsSkipped` and the new `ISagaObserver.OnStepSkipped`
+  notification (a default no-op, so existing observers are unaffected) rather than being invisible. The
+  conditional methods are distinct from `AddStep` / `AddResultStep`, which keep their original signatures.
+- **Step grouping / sub-sagas.** `SagaBuilder.AddSubSaga(name, configure)` composes a named sub-saga
+  over the same context into the parent. The sub-saga's steps are flattened inline, each prefixed as
+  `"{name}/{step}"`, so they become ordinary steps of the parent and participate in the parent's single
+  ordered run and single reverse-order rollback. A failure anywhere after the sub-saga unwinds the
+  sub-saga's completed steps along with the rest, newest-first, across the whole composed saga.
+- **Parallel step groups.** `SagaBuilder.AddParallelGroup(name, configure, condition)` runs a set of
+  independent member steps concurrently within one stage. Strictly opt-in; the default stays
+  sequential. The group is composed onto a single slot in the parent's flat list, so the parent's
+  ordering and overall reverse-order rollback are preserved. On any member failure the group waits for
+  the in-flight members to settle and surfaces the failure so the parent rolls back; the faulted member
+  is not compensated. The group's completed members are unwound through the saga's own per-step
+  compensation routine (reverse declaration order), so per-step compensation retry, observer
+  notifications, and `SagaResult.CompensationFailures` recording all apply to group members exactly as
+  to sequential steps. Each member's per-step timeout, forward retry, and `condition` are honoured (a
+  false member condition skips just that member); a group-level `condition` skips the whole group.
+- All additions are opt-in and additive: with no conditional step, sub-saga, or parallel group, the
+  forward run, compensation, `SagaResult`, and observer behaviour are unchanged from 0.4.0, and the
+  no-observer / no-condition happy path stays allocation-light.
 
 ### 0.4.0
 
@@ -109,17 +139,8 @@ What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the fu
 A rough plan with version targets. Dates are estimates, not commitments, and earlier items gate later
 ones.
 
-### 0.5.x: composition and control flow
-
-- **Conditional steps.** A first-class way to skip a step based on the context, instead of branching
-  inside the forward delegate.
-- **Step grouping / sub-sagas.** Compose a saga from smaller named sagas so a complex flow reads as a
-  few stages rather than one long list.
-- **Parallel step groups.** Run a set of independent steps concurrently within one stage, with
-  compensation still unwinding every completed step in the group on failure. Strictly opt-in; the
-  default stays sequential.
-
-Target: around Q1 2027.
+Composition and control flow (conditional steps, sub-sagas, and parallel step groups) shipped in
+0.5.0; see the Released section above.
 
 ### Observability and tooling, alongside the above
 

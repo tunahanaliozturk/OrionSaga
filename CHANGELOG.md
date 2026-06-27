@@ -6,6 +6,52 @@ All notable changes to OrionSaga are documented in this file. The format is base
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-27
+
+### Added
+
+- Conditional steps: a step can declare a `condition` predicate via the new
+  `SagaBuilder.AddConditionalStep` / `AddConditionalResultStep` methods and the `SagaStep` constructor
+  (exposed as `SagaStep.Condition`). When the predicate evaluates false against the context just before
+  the step would run, the step is skipped: its forward action does not run, it is not counted as
+  completed, and it is never compensated. A predicate that throws is treated exactly like a forward
+  fault: forward progress stops, the completed steps roll back, and the run reports failure on that
+  step. This replaces branching inside the forward delegate, so a skip is reflected in the result and
+  observer payloads instead of being invisible. A new `SagaResult.StepsSkipped` count and a new
+  `ISagaObserver.OnStepSkipped` notification (a default no-op so existing observers are unaffected)
+  report skips. The conditional capability is on distinct methods rather than an extra parameter on
+  `AddStep` / `AddResultStep`, so those existing overloads keep their original signatures and every
+  prior call site compiles and resolves unchanged.
+- Step grouping / sub-sagas: `SagaBuilder.AddSubSaga(name, configure)` composes a named sub-saga over
+  the same context into the parent. The sub-saga's steps are flattened inline at the call site, each
+  prefixed as `"{name}/{step}"`, so they become ordinary steps of the parent. They participate in the
+  parent's single ordered run and its single reverse-order rollback: a failure anywhere after the
+  sub-saga unwinds the sub-saga's completed steps along with the rest, newest-first, across the whole
+  composed saga, with no nesting and no special cases in the executor.
+- Parallel step groups: `SagaBuilder.AddParallelGroup(name, configure, condition)` runs a set of
+  independent member steps concurrently within one stage. The group is strictly opt-in; the default
+  stays sequential. The group is composed onto a single step occupying one slot in the parent's flat
+  list, so the parent's ordering and overall reverse-order rollback are preserved. On any member
+  failure the group waits for the in-flight members to settle and then surfaces the failure so the
+  parent rolls back; the faulted member is not compensated. Compensation of the group's completed
+  members runs through the saga's own per-step compensation routine, in reverse of their declaration
+  order: each member honours per-step compensation retry, emits the same observer notifications as a
+  sequential step, and any compensation that itself fails is recorded in `SagaResult.CompensationFailures`
+  and surfaced to the observer. This holds both when a member faults and when the group completed but a
+  later stage fails. Each member's own per-step timeout, forward retry, and `condition` are honoured: a
+  member whose condition is false is skipped (and never compensated) while the rest of the group still
+  runs. An optional group-level `condition` skips the whole group.
+
+### Notes
+
+- All additions are opt-in and additive. With no conditional step, sub-saga, or parallel group used,
+  the forward run, compensation, `SagaResult`, and observer behaviour are byte-for-byte as in 0.4.0,
+  and the no-observer happy path stays allocation-light: an ordinary step pays nothing for the feature
+  (it carries no condition and no group), and the existing `AddStep` / `AddResultStep` / retry /
+  rollback-budget / observer behaviour is unchanged. The conditional surface is on the new
+  `AddConditionalStep` / `AddConditionalResultStep` methods specifically so the existing `AddStep` /
+  `AddResultStep` overloads keep their pre-composition signatures.
+
 ## [0.4.0] - 2026-06-27
 
 ### Added
@@ -114,6 +160,7 @@ Initial release. In-process saga orchestration.
 compensation-failure isolation, empty saga, cancellation rollback, observer notifications and fault
 isolation, and registration.
 
+[0.5.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.2.0

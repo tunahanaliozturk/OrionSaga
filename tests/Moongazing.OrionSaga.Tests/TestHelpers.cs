@@ -20,4 +20,5 @@ internal sealed class CountingObserver : ISagaObserver
     public void OnStepFailed(string stepName, Exception exception) => Calls.Add($"failed:{stepName}");
     public void OnCompensated(string stepName) => Calls.Add($"compensated:{stepName}");
     public void OnCompensationFailed(string stepName, Exception exception) => Calls.Add($"compensationFailed:{stepName}");
+    public void OnStepSkipped(string stepName) => Calls.Add($"skipped:{stepName}");
 }
