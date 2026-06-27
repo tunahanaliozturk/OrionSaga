@@ -79,9 +79,24 @@ public sealed class Saga<TContext>
         // registered (the value is simply never read).
         var ordinal = 0;
 
+        // Steps skipped because their condition evaluated false. A skipped step never runs and is never
+        // compensated, so it is tracked separately from the completed-step stack and reported on its own.
+        var skipped = 0;
+
         foreach (var step in steps)
         {
             ordinal++;
+
+            // A conditional step whose predicate is false is skipped: not executed, not pushed onto the
+            // completed stack (so it is never compensated), and not counted as completed. The condition
+            // is only ever read here on the forward path, so a step with no condition pays nothing. The
+            // ordinal still advances so a later notification's position matches the step's declared slot.
+            if (step.Condition is { } condition && !condition(context))
+            {
+                skipped++;
+                NotifyStepSkipped(step.Name, ordinal);
+                continue;
+            }
 
             // Only measure forward-action duration when a real observer will consume it. The timing
             // source is allocation-free (a struct timestamp, no Stopwatch object), and gating it on
@@ -114,7 +129,7 @@ public sealed class Saga<TContext>
                 diagnostics?.RecordRun(succeeded: false);
                 return SagaResult.CreateCancelled(
                     step.Name, ex, timedOut, completedCount,
-                    rollback.Compensated, rollback.Failures, rollback.RollbackTimedOut);
+                    rollback.Compensated, skipped, rollback.Failures, rollback.RollbackTimedOut);
             }
 #pragma warning disable CA1031 // a saga turns ANY step failure into a compensating rollback
             catch (Exception ex)
@@ -128,12 +143,12 @@ public sealed class Saga<TContext>
                 diagnostics?.RecordRun(succeeded: false);
                 return SagaResult.CreateFailed(
                     step.Name, ex, completedCount,
-                    rollback.Compensated, rollback.Failures, rollback.RollbackTimedOut);
+                    rollback.Compensated, skipped, rollback.Failures, rollback.RollbackTimedOut);
             }
         }
 
         diagnostics?.RecordRun(succeeded: true);
-        return SagaResult.CreateSuccess(completed.Count);
+        return SagaResult.CreateSuccess(completed.Count, skipped);
     }
 
     private async Task ExecuteStep(SagaStep<TContext> step, TContext context, CancellationToken cancellationToken)
@@ -393,6 +408,25 @@ public sealed class Saga<TContext>
         try
         {
             observer.OnCompensationFailed(stepName, exception, ordinal, Stopwatch.GetElapsedTime(startTimestamp));
+        }
+#pragma warning disable CA1031 // observer is observability, not load-bearing
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            // An observer fault must never disrupt orchestration or rollback.
+        }
+    }
+
+    private void NotifyStepSkipped(string stepName, int ordinal)
+    {
+        if (!hasObserver)
+        {
+            return;
+        }
+
+        try
+        {
+            observer.OnStepSkipped(stepName, ordinal);
         }
 #pragma warning disable CA1031 // observer is observability, not load-bearing
         catch (Exception)

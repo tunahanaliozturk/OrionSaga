@@ -7,7 +7,8 @@ namespace Moongazing.OrionSaga.Orchestration;
 /// if its forward action runs longer than that budget it is cancelled and the saga rolls back. A step
 /// may also declare a <see cref="ForwardRetry"/> and/or <see cref="CompensationRetry"/> policy so a
 /// transient fault in the forward action or its compensation is retried before being treated as a
-/// failure.
+/// failure. A step may declare a <see cref="Condition"/>: when it evaluates false against the context
+/// the step is skipped entirely, neither executed nor compensated.
 /// </summary>
 /// <typeparam name="TContext">The shared context threaded through the saga.</typeparam>
 public sealed class SagaStep<TContext>
@@ -34,6 +35,12 @@ public sealed class SagaStep<TContext>
     /// compensation failure. Null falls back to any saga-wide compensation retry policy, or a single
     /// attempt when neither is set.
     /// </param>
+    /// <param name="condition">
+    /// An optional predicate evaluated against the context just before the step would run. When it
+    /// returns false the step is skipped: its forward action does not run, it is not counted as
+    /// completed, and it is never compensated. Null means the step always runs. The predicate is read
+    /// only on the forward path and must not mutate the context.
+    /// </param>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="timeout"/> is supplied and is not strictly positive.
     /// </exception>
@@ -43,7 +50,8 @@ public sealed class SagaStep<TContext>
         Func<TContext, CancellationToken, Task>? compensate = null,
         TimeSpan? timeout = null,
         RetryPolicy? forwardRetry = null,
-        RetryPolicy? compensationRetry = null)
+        RetryPolicy? compensationRetry = null,
+        Func<TContext, bool>? condition = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(execute);
@@ -58,6 +66,7 @@ public sealed class SagaStep<TContext>
         Timeout = timeout;
         ForwardRetry = forwardRetry;
         CompensationRetry = compensationRetry;
+        Condition = condition;
     }
 
     /// <summary>The step name.</summary>
@@ -87,4 +96,11 @@ public sealed class SagaStep<TContext>
     /// compensation fault is retried up to the policy's attempt count before being recorded as a failure.
     /// </summary>
     public RetryPolicy? CompensationRetry { get; }
+
+    /// <summary>
+    /// An optional predicate evaluated against the context immediately before the step would run. When
+    /// it returns false the step is skipped: it is neither executed nor compensated and is not counted
+    /// among the completed steps. Null means the step always runs.
+    /// </summary>
+    public Func<TContext, bool>? Condition { get; }
 }

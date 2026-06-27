@@ -33,15 +33,23 @@ public sealed class SagaBuilder<TContext>
     /// An optional retry-with-backoff policy for this step's compensation. Null falls back to any
     /// saga-wide policy set via <see cref="WithCompensationRetry"/>, or a single attempt when neither is set.
     /// </param>
+    /// <param name="condition">
+    /// An optional predicate evaluated against the context just before this step would run. When it
+    /// returns false the step is skipped: it is neither executed nor compensated and does not count as
+    /// completed. Null means the step always runs. Prefer this over branching inside
+    /// <paramref name="execute"/> so a skipped step is reflected in the result and observer payloads.
+    /// </param>
     public SagaBuilder<TContext> AddStep(
         string name,
         Func<TContext, CancellationToken, Task> execute,
         Func<TContext, CancellationToken, Task>? compensate = null,
         TimeSpan? timeout = null,
         RetryPolicy? forwardRetry = null,
-        RetryPolicy? compensationRetry = null)
+        RetryPolicy? compensationRetry = null,
+        Func<TContext, bool>? condition = null)
     {
-        steps.Add(new SagaStep<TContext>(name, execute, compensate, timeout, forwardRetry, compensationRetry));
+        steps.Add(new SagaStep<TContext>(
+            name, execute, compensate, timeout, forwardRetry, compensationRetry, condition));
         return this;
     }
 
@@ -55,7 +63,7 @@ public sealed class SagaBuilder<TContext>
     /// <remarks>
     /// This is deliberately a distinct method, not a generic overload of <see cref="AddStep(string,
     /// Func{TContext, CancellationToken, Task}, Func{TContext, CancellationToken, Task}?, TimeSpan?,
-    /// RetryPolicy?, RetryPolicy?)"/>.
+    /// RetryPolicy?, RetryPolicy?, Func{TContext, bool}?)"/>.
     /// An existing untyped call such as
     /// <c>AddStep("reserve", (_, _) =&gt; ReserveAsync(), (ctx, _) =&gt; ReleaseAsync(ctx))</c> whose
     /// forward action happens to return a <see cref="Task{TResult}"/> is convertible to a generic
@@ -92,6 +100,12 @@ public sealed class SagaBuilder<TContext>
     /// An optional retry-with-backoff policy for this step's compensation. Null falls back to any
     /// saga-wide policy set via <see cref="WithCompensationRetry"/>, or a single attempt when neither is set.
     /// </param>
+    /// <param name="condition">
+    /// An optional predicate evaluated against the context just before this step would run. When it
+    /// returns false the step is skipped: neither <paramref name="execute"/> nor <paramref name="apply"/>
+    /// runs, the step is not compensated, and it does not count as completed. Null means the step always
+    /// runs.
+    /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="execute"/> or <paramref name="apply"/> is null.
     /// </exception>
@@ -102,13 +116,14 @@ public sealed class SagaBuilder<TContext>
         Func<TContext, CancellationToken, Task>? compensate = null,
         TimeSpan? timeout = null,
         RetryPolicy? forwardRetry = null,
-        RetryPolicy? compensationRetry = null)
+        RetryPolicy? compensationRetry = null,
+        Func<TContext, bool>? condition = null)
     {
         ArgumentNullException.ThrowIfNull(execute);
         ArgumentNullException.ThrowIfNull(apply);
 
         steps.Add(new SagaStep<TContext>(
-            name, Adapt(execute, apply), compensate, timeout, forwardRetry, compensationRetry));
+            name, Adapt(execute, apply), compensate, timeout, forwardRetry, compensationRetry, condition));
         return this;
     }
 
@@ -118,6 +133,136 @@ public sealed class SagaBuilder<TContext>
     {
         ArgumentNullException.ThrowIfNull(step);
         steps.Add(step);
+        return this;
+    }
+
+    /// <summary>
+    /// Compose a named sub-saga into this saga so a complex flow reads as a few stages rather than one
+    /// long list of steps. The <paramref name="configure"/> callback declares the sub-saga's steps over
+    /// the same context; those steps are flattened inline into this saga at the point of the call, each
+    /// prefixed with <paramref name="name"/> (as <c>"{name}/{step}"</c>) so it stays identifiable in
+    /// results and telemetry.
+    /// </summary>
+    /// <remarks>
+    /// Flattening, rather than nesting, is deliberate: the sub-saga's steps become ordinary steps of the
+    /// parent, so they participate in the parent's single ordered run and its single reverse-order
+    /// rollback. A failure anywhere after the sub-saga unwinds the sub-saga's completed steps along with
+    /// the rest, newest-first, across the whole composed saga, with no special cases in the executor.
+    /// Only the sub-saga's steps are consumed; any diagnostics or observer configured on the inner
+    /// builder is ignored, because the parent owns run-level concerns. Conditional steps, timeouts,
+    /// retries, and parallel groups declared inside the sub-saga are preserved as-is.
+    /// </remarks>
+    /// <param name="name">The sub-saga name, used to prefix its steps. Must be non-empty.</param>
+    /// <param name="configure">Declares the sub-saga's steps on a fresh builder over the same context.</param>
+    /// <exception cref="ArgumentException"><paramref name="name"/> is null or empty.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="configure"/> is null.</exception>
+    public SagaBuilder<TContext> AddSubSaga(string name, Action<SagaBuilder<TContext>> configure)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        var inner = new SagaBuilder<TContext>();
+        configure(inner);
+
+        foreach (var step in inner.steps)
+        {
+            // Re-wrap each inner step under the stage-qualified name so it is identifiable in results
+            // and telemetry, preserving its forward/compensation actions and every per-step policy. The
+            // step then sits in the parent's flat list, so ordering and reverse compensation are the
+            // parent executor's existing behaviour with no nesting.
+            steps.Add(new SagaStep<TContext>(
+                $"{name}/{step.Name}",
+                step.Execute,
+                step.Compensate,
+                step.Timeout,
+                step.ForwardRetry,
+                step.CompensationRetry,
+                step.Condition));
+        }
+
+        return this;
+    }
+
+    /// <summary>
+    /// Add a named group of independent steps that run concurrently within one stage. The group is
+    /// strictly opt-in; without it a saga runs sequentially as before. The <paramref name="configure"/>
+    /// callback declares the group's members on a fresh builder over the same context; their forward
+    /// actions all start together and the group waits for all of them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The group is composed onto a single ordinary step occupying one slot in this saga's flat list, so
+    /// the parent's ordering and reverse-order rollback are unchanged and the group as a whole unwinds at
+    /// its position relative to the other stages.
+    /// </para>
+    /// <para>
+    /// On failure of any member the group waits for the in-flight members to settle, compensates every
+    /// member that completed (in reverse of their declaration order in the group), and then surfaces the
+    /// failure so the stages before the group roll back. When the group completes but a later stage
+    /// fails, the parent rolls the group back as one slot and its completed members again compensate in
+    /// reverse declaration order. Each member's own per-step timeout and forward retry are honoured;
+    /// members run concurrently, so their forward actions must be safe to run against the shared context
+    /// at the same time. The group itself is not a transaction: a partial failure is surfaced and
+    /// compensated, not isolated.
+    /// </para>
+    /// </remarks>
+    /// <param name="name">The group name, used to prefix its members and identify the group slot. Must be non-empty.</param>
+    /// <param name="configure">Declares the group's member steps on a fresh builder over the same context.</param>
+    /// <param name="condition">
+    /// An optional predicate evaluated against the context just before the group would run. When it
+    /// returns false the whole group is skipped: no member runs and none is compensated. Null means the
+    /// group always runs.
+    /// </param>
+    /// <exception cref="ArgumentException"><paramref name="name"/> is null or empty.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="configure"/> is null.</exception>
+    /// <exception cref="InvalidOperationException">The group declares no members.</exception>
+    public SagaBuilder<TContext> AddParallelGroup(
+        string name,
+        Action<SagaBuilder<TContext>> configure,
+        Func<TContext, bool>? condition = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        var inner = new SagaBuilder<TContext>();
+        configure(inner);
+
+        if (inner.steps.Count == 0)
+        {
+            throw new InvalidOperationException($"Parallel group '{name}' must declare at least one member.");
+        }
+
+        // Prefix each member so it stays identifiable in any member-level diagnostics, then hand the
+        // members to the group. The group is composed onto a single step: its Execute fans the members
+        // out concurrently, and its Compensate unwinds the completed members in reverse declaration
+        // order. The parent saga sees one ordinary step, so its ordering and reverse rollback are unchanged.
+        // Conditional skipping applies at the group level (the group-step's condition), not per member:
+        // a member's own condition is intentionally not carried in, since the group runs all its members
+        // and a per-member skip would have no slot to be reported against.
+        var members = new SagaStep<TContext>[inner.steps.Count];
+        for (var i = 0; i < inner.steps.Count; i++)
+        {
+            var member = inner.steps[i];
+            members[i] = new SagaStep<TContext>(
+                $"{name}/{member.Name}",
+                member.Execute,
+                member.Compensate,
+                member.Timeout,
+                member.ForwardRetry,
+                member.CompensationRetry,
+                condition: null);
+        }
+
+        var group = new ParallelStepGroup<TContext>(members);
+        steps.Add(new SagaStep<TContext>(
+            name,
+            group.ExecuteAsync,
+            group.CompensateAsync,
+            timeout: null,
+            forwardRetry: null,
+            compensationRetry: null,
+            condition));
+
         return this;
     }
 

@@ -37,6 +37,7 @@ public sealed class SagaResult
         bool timedOut,
         int stepsCompleted,
         int stepsCompensated,
+        int stepsSkipped,
         IReadOnlyList<CompensationFailure> compensationFailures,
         bool rollbackTimedOut)
     {
@@ -46,6 +47,7 @@ public sealed class SagaResult
         TimedOut = timedOut;
         StepsCompleted = stepsCompleted;
         StepsCompensated = stepsCompensated;
+        StepsSkipped = stepsSkipped;
         CompensationFailures = compensationFailures;
         RollbackTimedOut = rollbackTimedOut;
     }
@@ -89,6 +91,13 @@ public sealed class SagaResult
     /// </summary>
     public int StepsCompensated { get; }
 
+    /// <summary>
+    /// How many steps were skipped because their condition evaluated false. A skipped step's forward
+    /// action did not run and it was not compensated, so it counts toward neither
+    /// <see cref="StepsCompleted"/> nor <see cref="StepsCompensated"/>.
+    /// </summary>
+    public int StepsSkipped { get; }
+
     /// <summary>The name of the step that ended the saga, or null on success.</summary>
     public string? FailedStep { get; }
 
@@ -127,11 +136,12 @@ public sealed class SagaResult
             timedOut: false,
             stepsCompleted: 0,
             stepsCompensated: 0,
+            stepsSkipped: 0,
             [],
             rollbackTimedOut: false);
 
-    internal static SagaResult CreateSuccess(int stepsCompleted) =>
-        stepsCompleted == 0
+    internal static SagaResult CreateSuccess(int stepsCompleted, int stepsSkipped) =>
+        stepsCompleted == 0 && stepsSkipped == 0
             ? Success
             : new(
                 SagaOutcome.Succeeded,
@@ -140,6 +150,7 @@ public sealed class SagaResult
                 timedOut: false,
                 stepsCompleted,
                 stepsCompensated: 0,
+                stepsSkipped,
                 [],
                 rollbackTimedOut: false);
 
@@ -148,6 +159,7 @@ public sealed class SagaResult
         Exception failure,
         int stepsCompleted,
         int stepsCompensated,
+        int stepsSkipped,
         IReadOnlyList<CompensationFailure> compensationFailures,
         bool rollbackTimedOut) =>
         new(
@@ -157,6 +169,7 @@ public sealed class SagaResult
             timedOut: false,
             stepsCompleted,
             stepsCompensated,
+            stepsSkipped,
             compensationFailures,
             rollbackTimedOut);
 
@@ -166,6 +179,7 @@ public sealed class SagaResult
         bool timedOut,
         int stepsCompleted,
         int stepsCompensated,
+        int stepsSkipped,
         IReadOnlyList<CompensationFailure> compensationFailures,
         bool rollbackTimedOut) =>
         new(
@@ -175,6 +189,7 @@ public sealed class SagaResult
             timedOut,
             stepsCompleted,
             stepsCompensated,
+            stepsSkipped,
             compensationFailures,
             rollbackTimedOut);
 }

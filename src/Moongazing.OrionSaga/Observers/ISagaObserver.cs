@@ -34,6 +34,25 @@ public interface ISagaObserver
     void OnCompensationFailed(string stepName, Exception exception);
 
     /// <summary>
+    /// Called when a step is skipped because its condition evaluated false. A skipped step's forward
+    /// action does not run and it is never compensated. The default is a no-op so existing observers
+    /// are unaffected; override to observe skips.
+    /// </summary>
+    /// <param name="stepName">The step name.</param>
+    void OnStepSkipped(string stepName)
+    {
+    }
+
+    /// <summary>
+    /// Called when a step is skipped, with its one-based forward position. The default forwards to
+    /// <see cref="OnStepSkipped(string)"/> so existing observers are unaffected; override this overload
+    /// to receive the ordinal.
+    /// </summary>
+    /// <param name="stepName">The step name.</param>
+    /// <param name="ordinal">The step's one-based position in the saga (the first step is 1).</param>
+    void OnStepSkipped(string stepName, int ordinal) => OnStepSkipped(stepName);
+
+    /// <summary>
     /// Called after a step's forward action completes, with its position and how long it took. The
     /// default forwards to <see cref="OnStepCompleted(string)"/> so existing observers are unaffected;
     /// override this overload to receive the ordinal and duration.
