@@ -33,21 +33,68 @@ public sealed class SagaBuilder<TContext>
     /// An optional retry-with-backoff policy for this step's compensation. Null falls back to any
     /// saga-wide policy set via <see cref="WithCompensationRetry"/>, or a single attempt when neither is set.
     /// </param>
-    /// <param name="condition">
-    /// An optional predicate evaluated against the context just before this step would run. When it
-    /// returns false the step is skipped: it is neither executed nor compensated and does not count as
-    /// completed. Null means the step always runs. Prefer this over branching inside
-    /// <paramref name="execute"/> so a skipped step is reflected in the result and observer payloads.
-    /// </param>
+    /// <remarks>
+    /// The conditional capability is intentionally a distinct method, <see cref="AddConditionalStep"/>,
+    /// not an extra optional parameter on this overload. Appending a trailing predicate parameter here
+    /// would have changed this method's signature: a pre-composition call site that took the address of
+    /// the method group, or any code sensitive to its parameter list, would no longer bind to the same
+    /// member. Keeping this overload byte-for-byte as it shipped before composition guarantees every
+    /// existing <c>AddStep</c> call compiles and resolves unchanged; reach for
+    /// <see cref="AddConditionalStep"/> to make a step conditional.
+    /// </remarks>
     public SagaBuilder<TContext> AddStep(
         string name,
         Func<TContext, CancellationToken, Task> execute,
         Func<TContext, CancellationToken, Task>? compensate = null,
         TimeSpan? timeout = null,
         RetryPolicy? forwardRetry = null,
-        RetryPolicy? compensationRetry = null,
-        Func<TContext, bool>? condition = null)
+        RetryPolicy? compensationRetry = null)
     {
+        steps.Add(new SagaStep<TContext>(name, execute, compensate, timeout, forwardRetry, compensationRetry));
+        return this;
+    }
+
+    /// <summary>
+    /// Add a conditional step: an ordinary step plus a predicate evaluated against the context just
+    /// before the step would run. When the predicate returns false the step is skipped: it is neither
+    /// executed nor compensated and does not count as completed; the skip is reflected in the result and
+    /// observer payloads. When it returns true the step behaves exactly like <see cref="AddStep(string,
+    /// Func{TContext, CancellationToken, Task}, Func{TContext, CancellationToken, Task}?, TimeSpan?,
+    /// RetryPolicy?, RetryPolicy?)"/>. Prefer this over branching inside <paramref name="execute"/> so a
+    /// skipped step is visible to the result and the observer.
+    /// </summary>
+    /// <remarks>
+    /// This is a distinct method rather than an extra parameter on <c>AddStep</c> so adding the
+    /// conditional capability did not alter the existing <c>AddStep</c> overloads; see the remarks on
+    /// <see cref="AddStep(string, Func{TContext, CancellationToken, Task}, Func{TContext,
+    /// CancellationToken, Task}?, TimeSpan?, RetryPolicy?, RetryPolicy?)"/>.
+    /// </remarks>
+    /// <param name="name">The step name.</param>
+    /// <param name="execute">The forward action.</param>
+    /// <param name="condition">
+    /// The predicate evaluated against the context just before this step would run. When it returns
+    /// false the step is skipped. The predicate is read only on the forward path and must not mutate the
+    /// context. A predicate that throws is treated exactly like a forward fault: the step's prior
+    /// completed steps roll back and the run reports failure.
+    /// </param>
+    /// <param name="compensate">The compensating action; a no-op when null.</param>
+    /// <param name="timeout">
+    /// An optional maximum duration for the forward action. When it overruns, the step is cancelled
+    /// and the saga rolls back, reporting the timeout. Null means no budget. Must be positive when set.
+    /// </param>
+    /// <param name="forwardRetry">An optional retry-with-backoff policy for the forward action.</param>
+    /// <param name="compensationRetry">An optional retry-with-backoff policy for this step's compensation.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="condition"/> is null.</exception>
+    public SagaBuilder<TContext> AddConditionalStep(
+        string name,
+        Func<TContext, CancellationToken, Task> execute,
+        Func<TContext, bool> condition,
+        Func<TContext, CancellationToken, Task>? compensate = null,
+        TimeSpan? timeout = null,
+        RetryPolicy? forwardRetry = null,
+        RetryPolicy? compensationRetry = null)
+    {
+        ArgumentNullException.ThrowIfNull(condition);
         steps.Add(new SagaStep<TContext>(
             name, execute, compensate, timeout, forwardRetry, compensationRetry, condition));
         return this;
@@ -63,7 +110,7 @@ public sealed class SagaBuilder<TContext>
     /// <remarks>
     /// This is deliberately a distinct method, not a generic overload of <see cref="AddStep(string,
     /// Func{TContext, CancellationToken, Task}, Func{TContext, CancellationToken, Task}?, TimeSpan?,
-    /// RetryPolicy?, RetryPolicy?, Func{TContext, bool}?)"/>.
+    /// RetryPolicy?, RetryPolicy?)"/>.
     /// An existing untyped call such as
     /// <c>AddStep("reserve", (_, _) =&gt; ReserveAsync(), (ctx, _) =&gt; ReleaseAsync(ctx))</c> whose
     /// forward action happens to return a <see cref="Task{TResult}"/> is convertible to a generic
@@ -100,12 +147,6 @@ public sealed class SagaBuilder<TContext>
     /// An optional retry-with-backoff policy for this step's compensation. Null falls back to any
     /// saga-wide policy set via <see cref="WithCompensationRetry"/>, or a single attempt when neither is set.
     /// </param>
-    /// <param name="condition">
-    /// An optional predicate evaluated against the context just before this step would run. When it
-    /// returns false the step is skipped: neither <paramref name="execute"/> nor <paramref name="apply"/>
-    /// runs, the step is not compensated, and it does not count as completed. Null means the step always
-    /// runs.
-    /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="execute"/> or <paramref name="apply"/> is null.
     /// </exception>
@@ -116,11 +157,52 @@ public sealed class SagaBuilder<TContext>
         Func<TContext, CancellationToken, Task>? compensate = null,
         TimeSpan? timeout = null,
         RetryPolicy? forwardRetry = null,
-        RetryPolicy? compensationRetry = null,
-        Func<TContext, bool>? condition = null)
+        RetryPolicy? compensationRetry = null)
     {
         ArgumentNullException.ThrowIfNull(execute);
         ArgumentNullException.ThrowIfNull(apply);
+
+        steps.Add(new SagaStep<TContext>(
+            name, Adapt(execute, apply), compensate, timeout, forwardRetry, compensationRetry));
+        return this;
+    }
+
+    /// <summary>
+    /// Add a conditional typed step: an <see cref="AddResultStep"/> plus a predicate evaluated against
+    /// the context just before the step would run. When the predicate returns false the step is skipped:
+    /// neither <paramref name="execute"/> nor <paramref name="apply"/> runs, the step is not compensated,
+    /// and it does not count as completed. When it returns true the step behaves exactly like
+    /// <see cref="AddResultStep"/>. Kept distinct from <see cref="AddResultStep"/> for the same
+    /// source-compatibility reason as <see cref="AddConditionalStep"/>.
+    /// </summary>
+    /// <typeparam name="TResult">The type the forward action produces.</typeparam>
+    /// <param name="name">The step name.</param>
+    /// <param name="execute">The forward action, producing a value.</param>
+    /// <param name="apply">Writes the produced value into the context so later steps can read it.</param>
+    /// <param name="condition">
+    /// The predicate evaluated against the context just before this step would run. When it returns
+    /// false the step is skipped. A predicate that throws is treated exactly like a forward fault.
+    /// </param>
+    /// <param name="compensate">The compensating action; a no-op when null.</param>
+    /// <param name="timeout">An optional maximum duration for the forward action.</param>
+    /// <param name="forwardRetry">An optional retry-with-backoff policy for the forward action.</param>
+    /// <param name="compensationRetry">An optional retry-with-backoff policy for this step's compensation.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="execute"/>, <paramref name="apply"/>, or <paramref name="condition"/> is null.
+    /// </exception>
+    public SagaBuilder<TContext> AddConditionalResultStep<TResult>(
+        string name,
+        Func<TContext, CancellationToken, Task<TResult>> execute,
+        Action<TContext, TResult> apply,
+        Func<TContext, bool> condition,
+        Func<TContext, CancellationToken, Task>? compensate = null,
+        TimeSpan? timeout = null,
+        RetryPolicy? forwardRetry = null,
+        RetryPolicy? compensationRetry = null)
+    {
+        ArgumentNullException.ThrowIfNull(execute);
+        ArgumentNullException.ThrowIfNull(apply);
+        ArgumentNullException.ThrowIfNull(condition);
 
         steps.Add(new SagaStep<TContext>(
             name, Adapt(execute, apply), compensate, timeout, forwardRetry, compensationRetry, condition));
@@ -196,11 +278,13 @@ public sealed class SagaBuilder<TContext>
     /// its position relative to the other stages.
     /// </para>
     /// <para>
-    /// On failure of any member the group waits for the in-flight members to settle, compensates every
-    /// member that completed (in reverse of their declaration order in the group), and then surfaces the
-    /// failure so the stages before the group roll back. When the group completes but a later stage
-    /// fails, the parent rolls the group back as one slot and its completed members again compensate in
-    /// reverse declaration order. Each member's own per-step timeout and forward retry are honoured;
+    /// On failure of any member the group waits for the in-flight members to settle and then surfaces the
+    /// failure so the parent rolls back. Compensation is never run inline by the group: the parent unwinds
+    /// every completed member through its own per-step compensation routine, in reverse of their
+    /// declaration order in the group, so in-group compensation honours per-step compensation retry,
+    /// emits the same observer notifications, and records any compensation failure in the result exactly
+    /// like a sequential step. This holds both when a member faults and when the group completes but a
+    /// later stage fails. Each member's own per-step timeout, forward retry, and condition are honoured;
     /// members run concurrently, so their forward actions must be safe to run against the shared context
     /// at the same time. The group itself is not a transaction: a partial failure is surfaced and
     /// compensated, not isolated.
@@ -211,7 +295,9 @@ public sealed class SagaBuilder<TContext>
     /// <param name="condition">
     /// An optional predicate evaluated against the context just before the group would run. When it
     /// returns false the whole group is skipped: no member runs and none is compensated. Null means the
-    /// group always runs.
+    /// group always runs. This is distinct from a member's own condition (set via
+    /// <see cref="AddConditionalStep"/> inside <paramref name="configure"/>), which skips just that one
+    /// member while the rest of the group still runs.
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="name"/> is null or empty.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="configure"/> is null.</exception>
@@ -232,13 +318,13 @@ public sealed class SagaBuilder<TContext>
             throw new InvalidOperationException($"Parallel group '{name}' must declare at least one member.");
         }
 
-        // Prefix each member so it stays identifiable in any member-level diagnostics, then hand the
-        // members to the group. The group is composed onto a single step: its Execute fans the members
-        // out concurrently, and its Compensate unwinds the completed members in reverse declaration
-        // order. The parent saga sees one ordinary step, so its ordering and reverse rollback are unchanged.
-        // Conditional skipping applies at the group level (the group-step's condition), not per member:
-        // a member's own condition is intentionally not carried in, since the group runs all its members
-        // and a per-member skip would have no slot to be reported against.
+        // Prefix each member so it stays identifiable in results and telemetry, then hand the members to
+        // the group. The group is composed onto a single step: its Execute fans the members out
+        // concurrently. The parent saga sees one ordinary step, so its forward ordering is unchanged.
+        // Each member's own condition is carried in and honoured: a member whose predicate is false is
+        // skipped (its forward action never runs and it is never compensated), exactly like a conditional
+        // sequential step, while the rest of the group still runs. The group-level condition continues to
+        // skip the whole group.
         var members = new SagaStep<TContext>[inner.steps.Count];
         for (var i = 0; i < inner.steps.Count; i++)
         {
@@ -250,18 +336,27 @@ public sealed class SagaBuilder<TContext>
                 member.Timeout,
                 member.ForwardRetry,
                 member.CompensationRetry,
-                condition: null);
+                member.Condition);
         }
 
         var group = new ParallelStepGroup<TContext>(members);
+
+        // The group slot's Compensate delegate is never invoked: the executor detects the slot via its
+        // Group reference and unwinds the group's completed members through its own per-step compensation
+        // routine instead, so in-group compensation honours per-step retry, emits the same observer
+        // notifications, and records failures in the parent result. A no-op compensate keeps the slot a
+        // well-formed step; Group is what actually drives rollback.
         steps.Add(new SagaStep<TContext>(
             name,
             group.ExecuteAsync,
-            group.CompensateAsync,
+            compensate: null,
             timeout: null,
             forwardRetry: null,
             compensationRetry: null,
-            condition));
+            condition)
+        {
+            Group = group,
+        });
 
         return this;
     }

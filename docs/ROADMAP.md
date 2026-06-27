@@ -38,12 +38,14 @@ What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the fu
 
 ### 0.5.0
 
-- **Conditional steps.** A step can declare a `condition` predicate (on `AddStep` / `AddResultStep` /
-  `SagaStep`, exposed as `SagaStep.Condition`). When it evaluates false against the context just before
-  the step would run, the step is skipped: its forward action does not run, it is not counted as
-  completed, and it is never compensated. This replaces branching inside the forward delegate, so a
-  skip is visible in `SagaResult.StepsSkipped` and the new `ISagaObserver.OnStepSkipped` notification
-  (a default no-op, so existing observers are unaffected) rather than being invisible.
+- **Conditional steps.** A step can declare a `condition` predicate (via `AddConditionalStep` /
+  `AddConditionalResultStep` / `SagaStep`, exposed as `SagaStep.Condition`). When it evaluates false
+  against the context just before the step would run, the step is skipped: its forward action does not
+  run, it is not counted as completed, and it is never compensated; a predicate that throws is treated
+  like a forward fault and rolls back the completed steps. This replaces branching inside the forward
+  delegate, so a skip is visible in `SagaResult.StepsSkipped` and the new `ISagaObserver.OnStepSkipped`
+  notification (a default no-op, so existing observers are unaffected) rather than being invisible. The
+  conditional methods are distinct from `AddStep` / `AddResultStep`, which keep their original signatures.
 - **Step grouping / sub-sagas.** `SagaBuilder.AddSubSaga(name, configure)` composes a named sub-saga
   over the same context into the parent. The sub-saga's steps are flattened inline, each prefixed as
   `"{name}/{step}"`, so they become ordinary steps of the parent and participate in the parent's single
@@ -53,10 +55,12 @@ What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the fu
   independent member steps concurrently within one stage. Strictly opt-in; the default stays
   sequential. The group is composed onto a single slot in the parent's flat list, so the parent's
   ordering and overall reverse-order rollback are preserved. On any member failure the group waits for
-  the in-flight members to settle, compensates every member that completed (in reverse of their
-  declaration order in the group), and surfaces the failure so the earlier stages roll back; the
-  faulted member is not compensated. A completed group later rolled back unwinds its members in the
-  same reverse declaration order. Each member's per-step timeout and forward retry are honoured.
+  the in-flight members to settle and surfaces the failure so the parent rolls back; the faulted member
+  is not compensated. The group's completed members are unwound through the saga's own per-step
+  compensation routine (reverse declaration order), so per-step compensation retry, observer
+  notifications, and `SagaResult.CompensationFailures` recording all apply to group members exactly as
+  to sequential steps. Each member's per-step timeout, forward retry, and `condition` are honoured (a
+  false member condition skips just that member); a group-level `condition` skips the whole group.
 - All additions are opt-in and additive: with no conditional step, sub-saga, or parallel group, the
   forward run, compensation, `SagaResult`, and observer behaviour are unchanged from 0.4.0, and the
   no-observer / no-condition happy path stays allocation-light.

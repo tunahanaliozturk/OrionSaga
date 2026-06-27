@@ -78,16 +78,20 @@ public sealed class SagaResult
     /// How many step forward actions completed. On success this equals the number of steps in the
     /// saga. On a failure, cancellation, or timeout it is the count of steps that completed before the
     /// run ended; the step that ended the saga is not counted, since its forward action did not
-    /// complete.
+    /// complete. A parallel group counts as one completed step (one stage), regardless of how many
+    /// members it ran; its members are reflected individually in <see cref="StepsCompensated"/> when the
+    /// group is rolled back.
     /// </summary>
     public int StepsCompleted { get; }
 
     /// <summary>
-    /// How many completed steps were compensated cleanly during rollback. Always zero on success,
-    /// because a successful run rolls nothing back. A compensation that itself threw is recorded in
-    /// <see cref="CompensationFailures"/> and is not counted here, so
-    /// <see cref="StepsCompensated"/> plus <see cref="CompensationFailures"/> count equals the number
-    /// of completed steps that rollback attempted to undo.
+    /// How many completed compensations ran cleanly during rollback. Always zero on success, because a
+    /// successful run rolls nothing back. A compensation that itself threw is recorded in
+    /// <see cref="CompensationFailures"/> and is not counted here, so <see cref="StepsCompensated"/> plus
+    /// <see cref="CompensationFailures"/> count equals the number of compensations rollback attempted.
+    /// Each completed parallel group member that rollback unwinds is counted individually here, since the
+    /// group's members compensate through the same per-step routine as sequential steps; a rolled-back
+    /// group therefore contributes one count per completed member, not one for the group as a whole.
     /// </summary>
     public int StepsCompensated { get; }
 

@@ -44,10 +44,10 @@ public sealed class SagaCompositionTests
             .AddStep("a",
                 (c, _) => { c.Record("do-a"); return Task.CompletedTask; },
                 (c, _) => { c.Record("undo-a"); return Task.CompletedTask; })
-            .AddStep("conditional",
+            .AddConditionalStep("conditional",
                 (c, _) => { c.Record("do-conditional"); return Task.CompletedTask; },
-                (c, _) => { c.Record("undo-conditional"); return Task.CompletedTask; },
-                condition: _ => false)
+                condition: _ => false,
+                (c, _) => { c.Record("undo-conditional"); return Task.CompletedTask; })
             .AddStep("c",
                 (c, _) => { c.Record("do-c"); return Task.CompletedTask; },
                 (c, _) => { c.Record("undo-c"); return Task.CompletedTask; })
@@ -70,7 +70,7 @@ public sealed class SagaCompositionTests
         var ledger = new Ledger { Flag = true };
 
         var saga = new SagaBuilder<Ledger>()
-            .AddStep("conditional",
+            .AddConditionalStep("conditional",
                 (c, _) => { c.Record("do-conditional"); return Task.CompletedTask; },
                 condition: c => c.Flag)
             .Build();
@@ -93,10 +93,10 @@ public sealed class SagaCompositionTests
             .AddStep("a",
                 (c, _) => { c.Record("do-a"); return Task.CompletedTask; },
                 (c, _) => { c.Record("undo-a"); return Task.CompletedTask; })
-            .AddStep("skipped",
+            .AddConditionalStep("skipped",
                 (c, _) => { c.Record("do-skipped"); return Task.CompletedTask; },
-                (c, _) => { c.Record("undo-skipped"); return Task.CompletedTask; },
-                condition: _ => false)
+                condition: _ => false,
+                (c, _) => { c.Record("undo-skipped"); return Task.CompletedTask; })
             .AddStep("doomed", (_, _) => throw boom)
             .Build();
 

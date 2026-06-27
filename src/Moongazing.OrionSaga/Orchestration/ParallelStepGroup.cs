@@ -9,19 +9,20 @@ namespace Moongazing.OrionSaga.Orchestration;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Forward: every member's forward action is started concurrently and the group waits for all of them.
-/// If every member completes, the group completes and the parent may later roll it back. If any member
-/// faults, the group waits for the in-flight members to settle, compensates the members that did
-/// complete (so no member's effect is left dangling), and then surfaces the first member failure so the
-/// parent rolls back the stages that ran before the group. The faulted member is not compensated, since
-/// its forward action did not complete, exactly as for a single failed step.
+/// Forward: every member whose own condition holds has its forward action started concurrently and the
+/// group waits for all of them. If every started member completes, the group completes and the parent
+/// may later roll it back. If any member faults, the group waits for the in-flight members to settle and
+/// then surfaces the first member failure so the parent rolls back the group's completed members and the
+/// stages that ran before it. The faulted member is not compensated, since its forward action did not
+/// complete, exactly as for a single failed step.
 /// </para>
 /// <para>
-/// Compensation order within a group is defined and stable: completed members compensate in reverse of
-/// their declaration order in the group. This holds both when the parent rolls the whole group back
-/// after a later stage fails and when the group compensates its own completed members after one member
-/// faults. Across stages the parent's newest-first order still governs, so the group as a whole unwinds
-/// at its slot.
+/// Compensation is never performed inline by the group. Both after an in-group member fault and when a
+/// later stage fails, the parent saga unwinds the group's completed members through its own per-step
+/// compensation routine: each completed member compensates in reverse of its declaration order in the
+/// group, honouring per-step compensation retry, emitting the same observer notifications, and recording
+/// compensation failures in the parent result exactly like a sequential step. Across stages the parent's
+/// newest-first order still governs, so the group as a whole unwinds at its slot.
 /// </para>
 /// </remarks>
 /// <typeparam name="TContext">The shared context threaded through the saga.</typeparam>
@@ -29,8 +30,9 @@ internal sealed class ParallelStepGroup<TContext>
 {
     private readonly IReadOnlyList<SagaStep<TContext>> members;
 
-    // Members that completed their forward action, in declaration order. Recorded on the success path so
-    // the group's compensation (run by the parent when a later stage fails) can unwind them in reverse.
+    // Members that completed their forward action, in declaration order. Recorded on both the success
+    // and the failure path so the parent saga can unwind them (in reverse) through its own per-step
+    // compensation routine. Null until the forward action has run; an empty array means none completed.
     private SagaStep<TContext>[]? completedMembers;
 
     internal ParallelStepGroup(IReadOnlyList<SagaStep<TContext>> members)
@@ -39,71 +41,91 @@ internal sealed class ParallelStepGroup<TContext>
     }
 
     /// <summary>
-    /// The group's forward action: run every member concurrently. On full success, record the completed
-    /// members for later rollback and return. On any member failure, compensate the members that did
-    /// complete (reverse declaration order) and rethrow the first failure so the parent rolls back the
-    /// prior stages.
+    /// The members that completed their forward action, in declaration order. Populated by
+    /// <see cref="ExecuteAsync"/> on both success and failure so the parent can compensate them through
+    /// its own routine. Empty before the group runs and when no member completed.
+    /// </summary>
+    internal IReadOnlyList<SagaStep<TContext>> CompletedMembers => completedMembers ?? [];
+
+    /// <summary>
+    /// The group's forward action: run every member whose condition holds concurrently. On full success
+    /// record the completed members and return so the parent may later roll them back. On any member
+    /// failure record the members that did complete (so the parent compensates them through its own
+    /// routine) and rethrow the first failure so the parent rolls back the group and the prior stages.
+    /// The group never compensates inline.
     /// </summary>
     internal async Task ExecuteAsync(TContext context, CancellationToken cancellationToken)
     {
+        // Evaluate each member's condition once on the forward path, then start only the members that
+        // should run. A skipped member's slot holds a placeholder completed task so the completed-member
+        // scan can tell a skip apart from a real completion; a skipped member never runs and so is never
+        // a candidate for compensation. A member predicate that throws faults that member's task rather
+        // than escaping synchronously, so it routes through the group's normal failure path (the parent
+        // rolls back the members that completed and the prior stages) and never leaves a started sibling
+        // running unobserved.
+        var skipped = new bool[members.Count];
         var tasks = new Task[members.Count];
         for (var i = 0; i < members.Count; i++)
         {
-            // Start each member's forward action. RunMemberAsync honours the member's own per-step
-            // timeout and forward retry, so a group member behaves like a standalone step on its own
-            // attempt while sharing the group's cancellation token.
-            tasks[i] = RunMemberAsync(members[i], context, cancellationToken);
+            var member = members[i];
+            bool run;
+            try
+            {
+                run = ShouldRun(member, context);
+            }
+#pragma warning disable CA1031 // a throwing member predicate is treated as a member forward fault
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                skipped[i] = false;
+                tasks[i] = Task.FromException(ex);
+                continue;
+            }
+
+            skipped[i] = !run;
+            tasks[i] = run ? RunMemberAsync(member, context, cancellationToken) : Task.CompletedTask;
         }
 
-        // Wait for every member to settle before deciding the group's outcome, so a failure never leaves
-        // a sibling running unobserved. WhenAll surfaces the first exception; the per-task status below
-        // tells us exactly which members completed and which faulted.
         try
         {
             await Task.WhenAll(tasks).ConfigureAwait(false);
         }
-#pragma warning disable CA1031 // the group turns any member fault into an in-group rollback then rethrows
+#pragma warning disable CA1031 // the group records its completed members then rethrows for the parent to undo
         catch (Exception)
 #pragma warning restore CA1031
         {
-            // At least one member faulted. Gather the members that completed cleanly so they can be
-            // compensated in reverse declaration order, then surface the originating failure.
-            var done = new List<SagaStep<TContext>>(members.Count);
-            for (var i = 0; i < members.Count; i++)
-            {
-                if (tasks[i].IsCompletedSuccessfully)
-                {
-                    done.Add(members[i]);
-                }
-            }
-
-            await CompensateMembersAsync(done, context, cancellationToken).ConfigureAwait(false);
-
-            // Rethrow the first member failure (preserving its stack) so the parent treats the group as
-            // a failed step: a cancellation propagates as a cancellation, any other fault as a failure.
+            // At least one member faulted. Record the members that completed cleanly (excluding skipped
+            // ones) so the parent compensates them in reverse declaration order through its own routine,
+            // then surface the originating failure. No inline compensation happens here.
+            completedMembers = CollectCompleted(tasks, skipped);
             ThrowFirstFailure(tasks);
             throw; // unreachable: ThrowFirstFailure always throws when a task faulted.
         }
 
-        // Every member completed: remember them (declaration order) for the parent-driven rollback.
-        completedMembers = [.. members];
+        // Every started member completed: record them (declaration order, skipped ones excluded) for the
+        // parent-driven rollback.
+        completedMembers = CollectCompleted(tasks, skipped);
     }
 
-    /// <summary>
-    /// The group's compensation, invoked by the parent when a later stage fails and the group is unwound
-    /// as one slot. Compensate every member that completed, in reverse declaration order, under the
-    /// rollback token the parent supplies (so a rollback budget still bounds the group).
-    /// </summary>
-    internal Task CompensateAsync(TContext context, CancellationToken rollbackToken)
+    // A member runs when it has no condition or its condition holds against the context. Evaluated only
+    // on the forward path; a member with no condition always runs.
+    private static bool ShouldRun(SagaStep<TContext> member, TContext context) =>
+        member.Condition is not { } condition || condition(context);
+
+    private SagaStep<TContext>[] CollectCompleted(Task[] tasks, bool[] skipped)
     {
-        // No completed members recorded means the group never fully completed, so there is nothing to
-        // undo here. The success path always records them, so this is only the defensive empty case.
-        if (completedMembers is not { Length: > 0 } done)
+        var done = new List<SagaStep<TContext>>(members.Count);
+        for (var i = 0; i < members.Count; i++)
         {
-            return Task.CompletedTask;
+            // A member counts as completed only if it actually ran and finished successfully. A skipped
+            // member never ran, so it is excluded and is never compensated.
+            if (!skipped[i] && tasks[i].IsCompletedSuccessfully)
+            {
+                done.Add(members[i]);
+            }
         }
 
-        return CompensateMembersReverseAsync(done, context, rollbackToken);
+        return [.. done];
     }
 
     private static async Task RunMemberAsync(
@@ -163,32 +185,6 @@ internal sealed class ParallelStepGroup<TContext>
             throw new SagaStepTimeoutException(member.Name, budget, ex);
         }
     }
-
-    // Compensate the given completed members in reverse declaration order. A compensation fault is
-    // swallowed so the remaining members still compensate, mirroring the parent's best-effort rollback.
-    private static async Task CompensateMembersReverseAsync(
-        IReadOnlyList<SagaStep<TContext>> done, TContext context, CancellationToken rollbackToken)
-    {
-        for (var i = done.Count - 1; i >= 0; i--)
-        {
-            try
-            {
-                await done[i].Compensate(context, rollbackToken).ConfigureAwait(false);
-            }
-#pragma warning disable CA1031 // keep compensating the remaining members even if one undo fails
-            catch (Exception)
-#pragma warning restore CA1031
-            {
-                // Best-effort: a member compensation fault must not stop the others from unwinding.
-            }
-        }
-    }
-
-    // The in-group rollback after a member faults: the supplied list is in declaration order, so reuse
-    // the reverse-order helper to keep the documented within-group order identical on both paths.
-    private static Task CompensateMembersAsync(
-        IReadOnlyList<SagaStep<TContext>> done, TContext context, CancellationToken cancellationToken) =>
-        CompensateMembersReverseAsync(done, context, cancellationToken);
 
     private static void ThrowFirstFailure(Task[] tasks)
     {

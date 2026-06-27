@@ -69,6 +69,16 @@ public sealed class SagaStep<TContext>
         Condition = condition;
     }
 
+    /// <summary>
+    /// When this step is the slot of a parallel group, the group composed onto it; otherwise null. The
+    /// executor reads this on the rollback path so a group's completed members compensate through the
+    /// saga's own per-step compensation routine (per-step retry, observer notifications, and failure
+    /// recording) rather than an ad-hoc inline undo. Forward execution still runs through
+    /// <see cref="Execute"/>; only rollback is special-cased so the group's members unwind as if each
+    /// were an ordinary completed step. Null for every non-group step, so an ordinary step pays nothing.
+    /// </summary>
+    internal ParallelStepGroup<TContext>? Group { get; init; }
+
     /// <summary>The step name.</summary>
     public string Name { get; }
 
