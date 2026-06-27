@@ -18,13 +18,37 @@ public sealed class Saga<TContext>
     private readonly SagaDiagnostics? diagnostics;
     private readonly ISagaObserver observer;
     private readonly bool hasObserver;
+    private readonly RetryPolicy? compensationRetry;
+    private readonly TimeSpan? rollbackBudget;
+    private readonly Func<TimeSpan, CancellationToken, Task> delay;
 
-    internal Saga(IReadOnlyList<SagaStep<TContext>> steps, SagaDiagnostics? diagnostics, ISagaObserver? observer)
+    internal Saga(
+        IReadOnlyList<SagaStep<TContext>> steps,
+        SagaDiagnostics? diagnostics,
+        ISagaObserver? observer)
+        : this(steps, diagnostics, observer, compensationRetry: null, rollbackBudget: null, delay: null)
+    {
+    }
+
+    internal Saga(
+        IReadOnlyList<SagaStep<TContext>> steps,
+        SagaDiagnostics? diagnostics,
+        ISagaObserver? observer,
+        RetryPolicy? compensationRetry,
+        TimeSpan? rollbackBudget,
+        Func<TimeSpan, CancellationToken, Task>? delay)
     {
         ArgumentNullException.ThrowIfNull(steps);
         this.steps = steps;
         this.diagnostics = diagnostics;
         this.observer = observer ?? NullSagaObserver.Instance;
+        this.compensationRetry = compensationRetry;
+        this.rollbackBudget = rollbackBudget;
+
+        // The backoff delayer is injectable so tests can assert retry/backoff timing without sleeping.
+        // The default is Task.Delay; the field is only ever read on a retry path, so the no-retry happy
+        // path never touches it.
+        this.delay = delay ?? ((duration, token) => Task.Delay(duration, token));
 
         // The default observer is the inert null singleton. Detecting it once lets the hot path skip
         // the per-step notify entirely (no closure, no no-op call) when no real observer is registered.
@@ -36,8 +60,10 @@ public sealed class Saga<TContext>
     /// rollback outcome are reported: a forward fault yields <see cref="SagaOutcome.Failed"/>, while
     /// the caller's token being cancelled or a step overrunning its per-step timeout yields
     /// <see cref="SagaOutcome.Cancelled"/>. A step's per-step timeout is honoured alongside the
-    /// supplied token via a linked token. Compensation runs even when the supplied token is
-    /// cancelled, so a cancelled saga still rolls back.
+    /// supplied token via a linked token. A step may declare a forward retry policy, in which case a
+    /// transient forward fault is retried before the step is treated as failed. Compensation runs even
+    /// when the supplied token is cancelled, so a cancelled saga still rolls back; a configured rollback
+    /// budget bounds the whole unwind so a hung compensation cannot block forever.
     /// </summary>
     /// <param name="context">The shared context.</param>
     /// <param name="cancellationToken">Cancels forward progress (rollback still runs).</param>
@@ -84,10 +110,11 @@ public sealed class Saga<TContext>
                 diagnostics?.RecordStep(completed: false);
                 NotifyStepFailed(step.Name, ex, ordinal, startTimestamp);
 
-                var (cancelFailures, compensatedCount) = await CompensateAsync(completed, context).ConfigureAwait(false);
+                var rollback = await CompensateAsync(completed, context).ConfigureAwait(false);
                 diagnostics?.RecordRun(succeeded: false);
                 return SagaResult.CreateCancelled(
-                    step.Name, ex, timedOut, completedCount, compensatedCount, cancelFailures);
+                    step.Name, ex, timedOut, completedCount,
+                    rollback.Compensated, rollback.Failures, rollback.RollbackTimedOut);
             }
 #pragma warning disable CA1031 // a saga turns ANY step failure into a compensating rollback
             catch (Exception ex)
@@ -97,11 +124,11 @@ public sealed class Saga<TContext>
                 diagnostics?.RecordStep(completed: false);
                 NotifyStepFailed(step.Name, ex, ordinal, startTimestamp);
 
-                var (compensationFailures, compensatedCount) =
-                    await CompensateAsync(completed, context).ConfigureAwait(false);
+                var rollback = await CompensateAsync(completed, context).ConfigureAwait(false);
                 diagnostics?.RecordRun(succeeded: false);
                 return SagaResult.CreateFailed(
-                    step.Name, ex, completedCount, compensatedCount, compensationFailures);
+                    step.Name, ex, completedCount,
+                    rollback.Compensated, rollback.Failures, rollback.RollbackTimedOut);
             }
         }
 
@@ -109,7 +136,48 @@ public sealed class Saga<TContext>
         return SagaResult.CreateSuccess(completed.Count);
     }
 
-    private static async Task ExecuteStep(SagaStep<TContext> step, TContext context, CancellationToken cancellationToken)
+    private async Task ExecuteStep(SagaStep<TContext> step, TContext context, CancellationToken cancellationToken)
+    {
+        // No retry policy: run the single attempt directly, leaving the no-retry path exactly as it was.
+        if (step.ForwardRetry is not { } retry)
+        {
+            await ExecuteAttempt(step, context, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Retry the forward action up to the policy's attempt count. A successful attempt returns
+        // immediately. A cancellation (caller token or per-step timeout) is never retried: it is not a
+        // transient fault, so it propagates on the spot. Any other exception is retried until the last
+        // attempt, where it propagates and the saga rolls back as it would without a policy.
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await ExecuteAttempt(step, context, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation and per-step timeouts are terminal, not transient. Do not retry.
+                throw;
+            }
+#pragma warning disable CA1031 // a transient forward fault is retried until the attempt budget is spent
+            catch (Exception) when (attempt < retry.MaxAttempts)
+#pragma warning restore CA1031
+            {
+                // Wait the backoff for the next attempt, honouring the caller's token so a cancelled
+                // token cuts the wait short rather than blocking for the full delay.
+                var wait = retry.DelayBeforeAttempt(attempt + 1);
+                if (wait > TimeSpan.Zero)
+                {
+                    await delay(wait, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+    }
+
+    private static async Task ExecuteAttempt(
+        SagaStep<TContext> step, TContext context, CancellationToken cancellationToken)
     {
         if (step.Timeout is not { } budget)
         {
@@ -118,6 +186,7 @@ public sealed class Saga<TContext>
         }
 
         // Link the caller's token with a per-step deadline so either source cancels the forward action.
+        // The deadline bounds a single attempt: under a retry policy each attempt gets a fresh budget.
         using var timeoutCts = new CancellationTokenSource();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
         timeoutCts.CancelAfter(budget);
@@ -142,11 +211,19 @@ public sealed class Saga<TContext>
     private static bool TimeoutDeadlineFired(CancellationTokenSource timeoutCts, CancellationToken callerToken)
         => timeoutCts.IsCancellationRequested && !callerToken.IsCancellationRequested;
 
-    private async Task<(IReadOnlyList<CompensationFailure> Failures, int Compensated)> CompensateAsync(
-        Stack<SagaStep<TContext>> completed, TContext context)
+    private async Task<RollbackOutcome> CompensateAsync(Stack<SagaStep<TContext>> completed, TContext context)
     {
         var failures = new List<CompensationFailure>();
         var compensated = 0;
+        var rollbackTimedOut = false;
+
+        // The rollback budget bounds the whole unwind: a single CTS cancelled after the budget feeds the
+        // token every compensation observes, so a hung compensation is cut short rather than blocking
+        // forever. With no budget set the token is None, preserving the prior unbounded behaviour and
+        // allocating no CTS on that path. The undo still runs under cancellation; the budget only bounds
+        // how long it may take.
+        using var budgetCts = rollbackBudget is { } budget ? new CancellationTokenSource(budget) : null;
+        var rollbackToken = budgetCts?.Token ?? CancellationToken.None;
 
         // Steps unwind newest-first; the ordinal carried to the observer is each step's original
         // forward position, so a compensation notification can be correlated to the forward step that
@@ -157,13 +234,34 @@ public sealed class Saga<TContext>
         {
             var step = completed.Pop();
             var startTimestamp = hasObserver ? Stopwatch.GetTimestamp() : 0L;
+
+            // If the rollback budget has already elapsed, the remaining steps cannot compensate. Record
+            // each as a budget-driven failure so the result reflects that their effects may linger.
+            if (rollbackToken.IsCancellationRequested)
+            {
+                rollbackTimedOut = true;
+                var cancelled = new OperationCanceledException(rollbackToken);
+                failures.Add(new CompensationFailure(step.Name, cancelled));
+                diagnostics?.RecordCompensation(compensated: false);
+                NotifyCompensationFailed(step.Name, cancelled, ordinal, startTimestamp);
+                ordinal--;
+                continue;
+            }
+
             try
             {
-                // Roll back with a non-cancelled token: a cancelled saga must still undo its work.
-                await step.Compensate(context, CancellationToken.None).ConfigureAwait(false);
+                await CompensateStep(step, context, rollbackToken).ConfigureAwait(false);
                 compensated++;
                 diagnostics?.RecordCompensation(compensated: true);
                 NotifyCompensated(step.Name, ordinal, startTimestamp);
+            }
+            catch (OperationCanceledException ex) when (rollbackToken.IsCancellationRequested)
+            {
+                // The rollback budget elapsed mid-compensation: this step's undo was cut short.
+                rollbackTimedOut = true;
+                failures.Add(new CompensationFailure(step.Name, ex));
+                diagnostics?.RecordCompensation(compensated: false);
+                NotifyCompensationFailed(step.Name, ex, ordinal, startTimestamp);
             }
 #pragma warning disable CA1031 // record a compensation fault but keep rolling back the remaining steps
             catch (Exception ex)
@@ -177,8 +275,51 @@ public sealed class Saga<TContext>
             ordinal--;
         }
 
-        return (failures, compensated);
+        return new RollbackOutcome(failures, compensated, rollbackTimedOut);
     }
+
+    private async Task CompensateStep(SagaStep<TContext> step, TContext context, CancellationToken rollbackToken)
+    {
+        // The effective compensation policy is the step's own, falling back to the saga-wide one. No
+        // policy means a single attempt, leaving the no-retry rollback path exactly as it was.
+        var policy = step.CompensationRetry ?? compensationRetry;
+        if (policy is not { } retry)
+        {
+            await step.Compensate(context, rollbackToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Retry a transient compensation fault up to the policy's attempt count. A cancellation from the
+        // rollback budget is terminal, not transient, so it propagates immediately rather than being
+        // retried; the caller records it as a budget-driven failure.
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await step.Compensate(context, rollbackToken).ConfigureAwait(false);
+                return;
+            }
+            catch (OperationCanceledException) when (rollbackToken.IsCancellationRequested)
+            {
+                throw;
+            }
+#pragma warning disable CA1031 // a transient compensation fault is retried until the attempt budget is spent
+            catch (Exception) when (attempt < retry.MaxAttempts)
+#pragma warning restore CA1031
+            {
+                var wait = retry.DelayBeforeAttempt(attempt + 1);
+                if (wait > TimeSpan.Zero)
+                {
+                    await delay(wait, rollbackToken).ConfigureAwait(false);
+                }
+            }
+        }
+    }
+
+    // The rollback phase outcome: clean compensations counted, faults listed, and whether the rollback
+    // budget cut the unwind short. A small struct so the no-allocation goal of the result path is kept.
+    private readonly record struct RollbackOutcome(
+        IReadOnlyList<CompensationFailure> Failures, int Compensated, bool RollbackTimedOut);
 
     // The four notify helpers below pass the step name, ordinal, and duration directly to the observer
     // rather than through an Action, so the hot path allocates no per-step closure. When no real

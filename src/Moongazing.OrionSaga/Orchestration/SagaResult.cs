@@ -37,7 +37,8 @@ public sealed class SagaResult
         bool timedOut,
         int stepsCompleted,
         int stepsCompensated,
-        IReadOnlyList<CompensationFailure> compensationFailures)
+        IReadOnlyList<CompensationFailure> compensationFailures,
+        bool rollbackTimedOut)
     {
         Outcome = outcome;
         FailedStep = failedStep;
@@ -46,6 +47,7 @@ public sealed class SagaResult
         StepsCompleted = stepsCompleted;
         StepsCompensated = stepsCompensated;
         CompensationFailures = compensationFailures;
+        RollbackTimedOut = rollbackTimedOut;
     }
 
     /// <summary>How the run ended.</summary>
@@ -103,8 +105,19 @@ public sealed class SagaResult
     /// </summary>
     public IReadOnlyList<CompensationFailure> CompensationFailures { get; }
 
-    /// <summary>True when the saga did not succeed but every completed step compensated cleanly.</summary>
-    public bool RolledBackCleanly => !Succeeded && CompensationFailures.Count == 0;
+    /// <summary>
+    /// True when the rollback phase was cut short by the configured rollback budget before every
+    /// completed step finished compensating. Always false when no rollback budget is set or the
+    /// rollback completed within it. When true, one or more compensations were cancelled mid-flight,
+    /// so some effects may not have been undone and the run needs manual attention.
+    /// </summary>
+    public bool RollbackTimedOut { get; }
+
+    /// <summary>
+    /// True when the saga did not succeed but every completed step compensated cleanly and the rollback
+    /// was not cut short by its budget.
+    /// </summary>
+    public bool RolledBackCleanly => !Succeeded && CompensationFailures.Count == 0 && !RollbackTimedOut;
 
     internal static SagaResult Success { get; } =
         new(
@@ -114,7 +127,8 @@ public sealed class SagaResult
             timedOut: false,
             stepsCompleted: 0,
             stepsCompensated: 0,
-            []);
+            [],
+            rollbackTimedOut: false);
 
     internal static SagaResult CreateSuccess(int stepsCompleted) =>
         stepsCompleted == 0
@@ -126,14 +140,16 @@ public sealed class SagaResult
                 timedOut: false,
                 stepsCompleted,
                 stepsCompensated: 0,
-                []);
+                [],
+                rollbackTimedOut: false);
 
     internal static SagaResult CreateFailed(
         string failedStep,
         Exception failure,
         int stepsCompleted,
         int stepsCompensated,
-        IReadOnlyList<CompensationFailure> compensationFailures) =>
+        IReadOnlyList<CompensationFailure> compensationFailures,
+        bool rollbackTimedOut) =>
         new(
             SagaOutcome.Failed,
             failedStep,
@@ -141,7 +157,8 @@ public sealed class SagaResult
             timedOut: false,
             stepsCompleted,
             stepsCompensated,
-            compensationFailures);
+            compensationFailures,
+            rollbackTimedOut);
 
     internal static SagaResult CreateCancelled(
         string failedStep,
@@ -149,7 +166,8 @@ public sealed class SagaResult
         bool timedOut,
         int stepsCompleted,
         int stepsCompensated,
-        IReadOnlyList<CompensationFailure> compensationFailures) =>
+        IReadOnlyList<CompensationFailure> compensationFailures,
+        bool rollbackTimedOut) =>
         new(
             SagaOutcome.Cancelled,
             failedStep,
@@ -157,5 +175,6 @@ public sealed class SagaResult
             timedOut,
             stepsCompleted,
             stepsCompensated,
-            compensationFailures);
+            compensationFailures,
+            rollbackTimedOut);
 }

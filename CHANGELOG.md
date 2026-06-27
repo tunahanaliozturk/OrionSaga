@@ -6,6 +6,37 @@ All notable changes to OrionSaga are documented in this file. The format is base
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-27
+
+### Added
+
+- Per-step forward retry: a step can declare a `RetryPolicy` via the new `forwardRetry` parameter on
+  `SagaBuilder.AddStep` / `AddResultStep` and the `SagaStep` constructor (exposed as
+  `SagaStep.ForwardRetry`). When set, a transient forward fault is retried with backoff up to the
+  policy's attempt count before the step is treated as failed, so a flaky call does not force a full
+  rollback. A cancellation or a per-step timeout is terminal, not transient, and is never retried.
+  When a per-step `timeout` is also set it bounds each attempt individually; the backoff waits honour
+  the step's cancellation token.
+- Compensation retry: a step can declare a `RetryPolicy` for its compensation via the new
+  `compensationRetry` parameter (exposed as `SagaStep.CompensationRetry`), and a saga-wide default can
+  be set with `SagaBuilder.WithCompensationRetry`. A transient compensation fault is retried before
+  being recorded as a `CompensationFailure`, since a failed undo is the most expensive outcome. A
+  per-step policy overrides the saga-wide one; with neither set, compensation runs once as before.
+- Configurable rollback budget: `SagaBuilder.WithRollbackBudget` bounds the whole unwind phase to a
+  maximum duration. Previously rollback ran with a non-cancelled token, so a hung compensation could
+  block forever; with a budget set, the token passed to compensations is cancelled once the budget
+  elapses and the run reports `SagaResult.RollbackTimedOut`. Compensations cut short or never reached
+  are recorded as `CompensationFailure`s. With no budget set the prior unbounded behaviour is unchanged.
+- `RetryPolicy` value type (`maxAttempts`, `baseDelay`, `RetryBackoff` of `Constant` or `Exponential`)
+  and `SagaResult.RollbackTimedOut`.
+
+### Notes
+
+- All additions are opt-in and additive. With no retry policy and no rollback budget configured, the
+  forward run, compensation, `SagaResult`, and observer behaviour are byte-for-byte as in 0.3.0, and
+  the no-observer / no-retry happy path stays allocation-light: the backoff delayer is only touched on
+  a retry path and the rollback budget allocates no cancellation source when unset.
+
 ## [0.3.0] - 2026-06-22
 
 ### Added
@@ -83,6 +114,7 @@ Initial release. In-process saga orchestration.
 compensation-failure isolation, empty saga, cancellation rollback, observer notifications and fault
 isolation, and registration.
 
+[0.4.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.1.0

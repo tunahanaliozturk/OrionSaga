@@ -13,6 +13,8 @@ public sealed class SagaBuilder<TContext>
     private readonly List<SagaStep<TContext>> steps = [];
     private SagaDiagnostics? diagnostics;
     private ISagaObserver? observer;
+    private RetryPolicy? compensationRetry;
+    private TimeSpan? rollbackBudget;
 
     /// <summary>Add a step with a forward action and a compensating action.</summary>
     /// <param name="name">The step name.</param>
@@ -22,13 +24,24 @@ public sealed class SagaBuilder<TContext>
     /// An optional maximum duration for the forward action. When it overruns, the step is cancelled
     /// and the saga rolls back, reporting the timeout. Null means no budget. Must be positive when set.
     /// </param>
+    /// <param name="forwardRetry">
+    /// An optional retry-with-backoff policy for the forward action. When set, a transient forward fault
+    /// is retried up to the policy's attempt count before the step fails and the saga rolls back. Null
+    /// means a single attempt. A per-step <paramref name="timeout"/> bounds each attempt individually.
+    /// </param>
+    /// <param name="compensationRetry">
+    /// An optional retry-with-backoff policy for this step's compensation. Null falls back to any
+    /// saga-wide policy set via <see cref="WithCompensationRetry"/>, or a single attempt when neither is set.
+    /// </param>
     public SagaBuilder<TContext> AddStep(
         string name,
         Func<TContext, CancellationToken, Task> execute,
         Func<TContext, CancellationToken, Task>? compensate = null,
-        TimeSpan? timeout = null)
+        TimeSpan? timeout = null,
+        RetryPolicy? forwardRetry = null,
+        RetryPolicy? compensationRetry = null)
     {
-        steps.Add(new SagaStep<TContext>(name, execute, compensate, timeout));
+        steps.Add(new SagaStep<TContext>(name, execute, compensate, timeout, forwardRetry, compensationRetry));
         return this;
     }
 
@@ -41,7 +54,8 @@ public sealed class SagaBuilder<TContext>
     /// </summary>
     /// <remarks>
     /// This is deliberately a distinct method, not a generic overload of <see cref="AddStep(string,
-    /// Func{TContext, CancellationToken, Task}, Func{TContext, CancellationToken, Task}?, TimeSpan?)"/>.
+    /// Func{TContext, CancellationToken, Task}, Func{TContext, CancellationToken, Task}?, TimeSpan?,
+    /// RetryPolicy?, RetryPolicy?)"/>.
     /// An existing untyped call such as
     /// <c>AddStep("reserve", (_, _) =&gt; ReserveAsync(), (ctx, _) =&gt; ReleaseAsync(ctx))</c> whose
     /// forward action happens to return a <see cref="Task{TResult}"/> is convertible to a generic
@@ -68,6 +82,16 @@ public sealed class SagaBuilder<TContext>
     /// The budget covers the forward action only; <paramref name="apply"/> is expected to be a cheap,
     /// synchronous assignment.
     /// </param>
+    /// <param name="forwardRetry">
+    /// An optional retry-with-backoff policy for the forward action. When set, a transient fault in the
+    /// forward action (or in <paramref name="apply"/>, since they run on the same attempt) is retried up
+    /// to the policy's attempt count before the step fails. Null means a single attempt. A per-step
+    /// <paramref name="timeout"/> bounds each attempt individually.
+    /// </param>
+    /// <param name="compensationRetry">
+    /// An optional retry-with-backoff policy for this step's compensation. Null falls back to any
+    /// saga-wide policy set via <see cref="WithCompensationRetry"/>, or a single attempt when neither is set.
+    /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="execute"/> or <paramref name="apply"/> is null.
     /// </exception>
@@ -76,12 +100,15 @@ public sealed class SagaBuilder<TContext>
         Func<TContext, CancellationToken, Task<TResult>> execute,
         Action<TContext, TResult> apply,
         Func<TContext, CancellationToken, Task>? compensate = null,
-        TimeSpan? timeout = null)
+        TimeSpan? timeout = null,
+        RetryPolicy? forwardRetry = null,
+        RetryPolicy? compensationRetry = null)
     {
         ArgumentNullException.ThrowIfNull(execute);
         ArgumentNullException.ThrowIfNull(apply);
 
-        steps.Add(new SagaStep<TContext>(name, Adapt(execute, apply), compensate, timeout));
+        steps.Add(new SagaStep<TContext>(
+            name, Adapt(execute, apply), compensate, timeout, forwardRetry, compensationRetry));
         return this;
     }
 
@@ -110,8 +137,47 @@ public sealed class SagaBuilder<TContext>
         return this;
     }
 
+    /// <summary>
+    /// Apply a saga-wide retry-with-backoff policy to every step's compensation, since a failed undo is
+    /// the most expensive outcome of a rollback. A step that declares its own compensation retry overrides
+    /// this for that step. Null clears the saga-wide policy.
+    /// </summary>
+    /// <param name="value">The compensation retry policy, or null to clear it.</param>
+    public SagaBuilder<TContext> WithCompensationRetry(RetryPolicy? value)
+    {
+        compensationRetry = value;
+        return this;
+    }
+
+    /// <summary>
+    /// Bound the whole rollback/compensation phase to a maximum duration. Today rollback runs with a
+    /// non-cancelled token, so a hung compensation can block forever; with a budget set, the token passed
+    /// to compensations is cancelled once the budget elapses, so a hung compensation is cut short and the
+    /// run reports the rollback as having timed out. The budget covers the entire unwind, not each step.
+    /// Null means no budget (the prior unbounded behaviour). Must be positive when set.
+    /// </summary>
+    /// <param name="value">The rollback-phase budget, or null for no budget.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="value"/> is set and not positive.</exception>
+    public SagaBuilder<TContext> WithRollbackBudget(TimeSpan? value)
+    {
+        if (value is { } budget && budget <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(value), budget, "Rollback budget must be positive.");
+        }
+
+        rollbackBudget = value;
+        return this;
+    }
+
     /// <summary>Build the runnable saga.</summary>
-    public Saga<TContext> Build() => new(steps.ToArray(), diagnostics, observer);
+    public Saga<TContext> Build() => Build(delay: null);
+
+    // Build with an optional injected backoff delay. The public Build passes null, so the saga uses the
+    // real Task.Delay; tests pass a delay that records the requested wait and returns synchronously, so
+    // retry/backoff behaviour is asserted without any wall-clock sleep. Internal so only the test project
+    // (via InternalsVisibleTo) can reach the seam; the public surface stays the single parameterless Build.
+    internal Saga<TContext> Build(Func<TimeSpan, CancellationToken, Task>? delay) =>
+        new(steps.ToArray(), diagnostics, observer, compensationRetry, rollbackBudget, delay);
 
     // Fold the typed forward action and its apply step into the single untyped delegate shape the
     // executor already runs. The value the forward action produces is handed to apply, which lands it
