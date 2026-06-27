@@ -2,16 +2,16 @@
 
 Where OrionSaga has been and where it might go next.
 
-Current release: **0.3.0**. An in-process saga orchestrator that runs an ordered set of steps over a
+Current release: **0.4.0**. An in-process saga orchestrator that runs an ordered set of steps over a
 shared context and compensates the completed steps in reverse order when one fails, cancels, or
-overruns its timeout.
+overruns its timeout, with opt-in per-step retry, compensation retry, and a bounded rollback budget.
 
 This document records what has shipped and lays out a forward plan. The shipped section is fact. The
 forward plan is a direction with rough version targets, not a contract: items move, merge, and get
 dropped as real usage shows what matters. If you want something here, open an issue and describe the
 workload that needs it; demand is what moves an idea forward.
 
-For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, and 0.3.0 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
+For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, 0.3.0, and 0.4.0 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
 
 ---
 
@@ -34,6 +34,25 @@ unwind them cleanly when one fails. Any addition is weighed against that focus.
 ## Released
 
 What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the full history.
+
+### 0.4.0
+
+- **Per-step forward retry.** An opt-in `RetryPolicy` (attempts plus constant or exponential backoff)
+  declared per step via `forwardRetry` on `AddStep` / `AddResultStep` / `SagaStep`, so a transient
+  forward fault is retried before the step is treated as a failure and a flaky call does not force a
+  full rollback. Cancellation and per-step timeouts are terminal and never retried; a per-step timeout,
+  when set, bounds each attempt individually, and backoff waits honour the step's cancellation token.
+- **Compensation retry.** The same `RetryPolicy` for a step's compensation, declared per step via
+  `compensationRetry` or saga-wide via `WithCompensationRetry` (per-step overrides saga-wide), since a
+  failed undo is the most expensive outcome. A transient compensation fault is retried before being
+  recorded as a `CompensationFailure`.
+- **Configurable rollback budget.** `WithRollbackBudget` bounds the whole unwind phase, so a hung
+  compensation cannot block forever. When the budget elapses the compensation token is cancelled, the
+  remaining steps are recorded as failures, and the run reports `SagaResult.RollbackTimedOut`. With no
+  budget set, rollback is unbounded exactly as before.
+- All additions are opt-in and additive: with no retry policy and no rollback budget configured the
+  forward run, compensation, `SagaResult`, and observer behaviour are unchanged from 0.3.0, and the
+  no-observer / no-retry happy path stays allocation-light.
 
 ### 0.3.0
 
@@ -89,18 +108,6 @@ What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the fu
 
 A rough plan with version targets. Dates are estimates, not commitments, and earlier items gate later
 ones.
-
-### 0.4.x: per-step resilience
-
-- **Per-step retry policies.** An opt-in retry-with-backoff around a forward action before it is
-  treated as a failure, for transient faults. Declared per step so a flaky call does not force a full
-  rollback.
-- **Compensation retry.** The same idea for compensations, since a failed undo is the most expensive
-  outcome.
-- **Configurable rollback budget.** Today rollback runs with a non-cancelled token; a bounded timeout
-  for the unwind, so a hung compensation cannot block forever.
-
-Target: around Q4 2026.
 
 ### 0.5.x: composition and control flow
 
