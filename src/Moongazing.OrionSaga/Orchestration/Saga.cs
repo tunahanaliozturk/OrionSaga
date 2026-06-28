@@ -1,5 +1,6 @@
 namespace Moongazing.OrionSaga.Orchestration;
 
+using System.Collections.Immutable;
 using System.Diagnostics;
 
 using Moongazing.OrionSaga.Diagnostics;
@@ -97,16 +98,18 @@ public sealed class Saga<TContext>
         {
             ordinal++;
 
-            // Only measure forward-action duration when a real observer will consume it. The timing
-            // source is allocation-free (a struct timestamp, no Stopwatch object), and gating it on
-            // hasObserver keeps the no-observer happy path byte-for-byte as it was: no timestamp read,
-            // no duration computed.
-            var startTimestamp = hasObserver ? Stopwatch.GetTimestamp() : 0L;
-
             // Report the run state to an observer before the step runs: this step is the current one,
             // the completed stack is what would compensate, and the rest are pending. Gated on
             // hasObserver so the no-observer path builds no snapshot and allocates nothing.
             NotifyProgress(completed, currentStep: new StepReference(step.Name, ordinal), nextIndex: ordinal);
+
+            // Only measure forward-action duration when a real observer will consume it. The timing
+            // source is allocation-free (a struct timestamp, no Stopwatch object), and gating it on
+            // hasObserver keeps the no-observer happy path byte-for-byte as it was: no timestamp read,
+            // no duration computed. The timestamp is taken AFTER the progress notification so the
+            // observer's OnProgress handler time is not counted against the step's measured duration:
+            // the duration reflects the forward action alone, not the callback that announced it.
+            var startTimestamp = hasObserver ? Stopwatch.GetTimestamp() : 0L;
 
             // Start the step span as a child of the run span. Null when no listener, so the no-listener
             // path starts no Activity and tags nothing. Tags carry the step name and ordinal; the
@@ -587,36 +590,50 @@ public sealed class Saga<TContext>
     // matching CompletedSteps' contract; the stack iterates newest-first, so it is reversed here.
     private SagaRunSnapshot BuildSnapshot(Stack<CompletedStep> completed, StepReference? currentStep, int nextIndex)
     {
-        var completedRefs = new StepReference[completed.Count];
-
-        // Stack enumeration yields newest-first; place each at its oldest-first index so CompletedSteps
-        // reads in run order and WouldCompensate (its reverse) reads in unwind order.
-        var i = completed.Count - 1;
-        foreach (var entry in completed)
+        // Copy the live completed stack and the remaining step list into immutable arrays so the snapshot
+        // exposes nothing the caller can mutate. The builders are sized exactly, so each MoveToImmutable
+        // transfers the backing array with no extra copy.
+        ImmutableArray<StepReference> completedRefs;
+        if (completed.Count == 0)
         {
-            completedRefs[i] = new StepReference(entry.Step.Name, entry.Ordinal);
-            i--;
+            completedRefs = ImmutableArray<StepReference>.Empty;
+        }
+        else
+        {
+            var completedBuilder = ImmutableArray.CreateBuilder<StepReference>(completed.Count);
+            completedBuilder.Count = completed.Count;
+
+            // Stack enumeration yields newest-first; place each at its oldest-first index so
+            // CompletedSteps reads in run order and WouldCompensate (its reverse) reads in unwind order.
+            var i = completed.Count - 1;
+            foreach (var entry in completed)
+            {
+                completedBuilder[i] = new StepReference(entry.Step.Name, entry.Ordinal);
+                i--;
+            }
+
+            completedRefs = completedBuilder.MoveToImmutable();
         }
 
         // Pending steps are the declared steps after the current one. nextIndex is the current step's
         // one-based ordinal, so declared steps at index nextIndex onward have not run yet. At the
         // terminal call (currentStep null, nextIndex == steps.Count) this is empty.
         var pendingCount = steps.Count - nextIndex;
-        IReadOnlyList<StepReference> pending;
+        ImmutableArray<StepReference> pending;
         if (pendingCount <= 0)
         {
-            pending = [];
+            pending = ImmutableArray<StepReference>.Empty;
         }
         else
         {
-            var pendingRefs = new StepReference[pendingCount];
+            var pendingBuilder = ImmutableArray.CreateBuilder<StepReference>(pendingCount);
             for (var p = 0; p < pendingCount; p++)
             {
                 var index = nextIndex + p;
-                pendingRefs[p] = new StepReference(steps[index].Name, index + 1);
+                pendingBuilder.Add(new StepReference(steps[index].Name, index + 1));
             }
 
-            pending = pendingRefs;
+            pending = pendingBuilder.MoveToImmutable();
         }
 
         return new SagaRunSnapshot(currentStep, completedRefs, pending, steps.Count);

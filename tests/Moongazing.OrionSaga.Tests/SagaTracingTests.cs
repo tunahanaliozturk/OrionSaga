@@ -30,27 +30,60 @@ public sealed class SagaTracingTests
     /// root span and keeping only OrionSaga spans that share its <see cref="ActivityTraceId"/>, so the
     /// spans of other tests running concurrently in the same process do not leak in.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two listeners are used, by design. A short-lived listener scoped to the test-root source mints the
+    /// root span and yields its <see cref="ActivityTraceId"/>; only then is the recording listener
+    /// attached, with the run's TraceId already captured into <c>rootTraceId</c>. This ordering is the
+    /// fix for the foreign-span leak: the recording listener can never fire before its filter is
+    /// initialised, so it can never observe (nor throw on) a span from another test's saga run that is
+    /// executing concurrently in the same process. The recording listener is also scoped to ONLY the
+    /// saga source (exact name match) and filters captured spans to <c>rootTraceId</c>, so a concurrent
+    /// run's spans are doubly excluded: the listener does not record them, and even if it did the TraceId
+    /// guard would drop them.
+    /// </para>
+    /// <para>
+    /// <see cref="OnStopped"/> is null-safe and never throws, so it cannot fault a foreign test thread
+    /// that disposes a saga span while this recorder is briefly live.
+    /// </para>
+    /// </remarks>
     private sealed class ActivityRecorder : IDisposable
     {
         private readonly ActivityListener listener;
         private readonly object gate = new();
         private readonly Activity root;
+        private readonly ActivityTraceId rootTraceId;
 
         public ActivityRecorder()
         {
+            // Phase 1: mint the root span via a listener scoped to ONLY the test-root source, so this
+            // listener can never observe a saga span. Sample AllData so the root is real and carries a
+            // TraceId the run span will inherit.
+            using (var rootListener = new ActivityListener
+            {
+                ShouldListenTo = source => source.Name == TestRootSourceName,
+                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            })
+            {
+                ActivitySource.AddActivityListener(rootListener);
+                root = TestRootSource.StartActivity("test-root", ActivityKind.Internal)!;
+            }
+
+            // Capture the run's TraceId BEFORE the recording listener is attached, so the listener's
+            // filter is fully initialised the instant it can fire. No foreign span can be observed before
+            // this point because the recording listener does not exist yet.
+            rootTraceId = root.TraceId;
+
+            // Phase 2: attach the recording listener, scoped to ONLY the saga source. Its filter
+            // (rootTraceId) is already set, so it observes nothing foreign and throws on nothing foreign.
             listener = new ActivityListener
             {
-                ShouldListenTo = source =>
-                    source.Name == SagaActivitySource.Name || source.Name == TestRootSourceName,
+                ShouldListenTo = source => source.Name == SagaActivitySource.Name,
                 Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
                 ActivityStopped = OnStopped,
             };
 
             ActivitySource.AddActivityListener(listener);
-
-            // Start the root once a listener is attached so it samples; the run span the test starts
-            // next nests under it and shares this TraceId.
-            root = TestRootSource.StartActivity("test-root", ActivityKind.Internal)!;
         }
 
         // Spans in the order they completed (stopped), so a child step span appears before the run span.
@@ -59,7 +92,11 @@ public sealed class SagaTracingTests
 
         private void OnStopped(Activity activity)
         {
-            if (activity.Source.Name != SagaActivitySource.Name || activity.TraceId != root.TraceId)
+            // Keep only this run's saga spans. The source is already filtered by ShouldListenTo; the
+            // TraceId guard drops any span that does not belong to this recorder's run. Both checks are
+            // cheap and never throw, so this callback can never fault a foreign test thread that disposes
+            // a saga span while this recorder is live.
+            if (activity.TraceId != rootTraceId)
             {
                 return;
             }
@@ -245,11 +282,49 @@ public sealed class SagaTracingTests
     }
 
     [Fact]
-    public async Task With_no_listener_no_activity_is_started_and_behaviour_is_unchanged()
+    public async Task A_parallel_group_member_timeout_tags_the_member_span_timedout_and_the_run_timedout()
     {
-        // No ActivityRecorder is registered. Capture whatever activity the run leaves current; the run
-        // must start none, so Activity.Current stays exactly what it was before the call.
-        var before = Activity.Current;
+        using var recorder = new ActivityRecorder();
+
+        // A single-member group whose member overruns its own per-step deadline. The member span must be
+        // tagged "timedout" (distinct from a plain "cancelled"), matching the run-level TimedOut outcome.
+        var saga = new SagaBuilder<object>()
+            .AddParallelGroup("group", g => g
+                .AddStep(
+                    "slow",
+                    async (_, ct) => await Task.Delay(Timeout.Infinite, ct),
+                    timeout: TimeSpan.FromMilliseconds(20)))
+            .Build();
+
+        var result = await saga.RunAsync(new object());
+        Assert.True(result.TimedOut);
+
+        var stepSpans = recorder.ByName(SagaActivitySource.StepActivityName);
+        var member = Assert.Single(stepSpans, s => Tag(s, SagaActivitySource.StepNameTag) == "group/slow");
+        Assert.Equal("timedout", Tag(member, SagaActivitySource.OutcomeTag));
+        Assert.Equal("timedout", Tag(recorder.Run, SagaActivitySource.OutcomeTag));
+    }
+
+    [Fact]
+    public async Task With_no_listener_no_activity_is_started_and_the_ambient_activity_is_preserved()
+    {
+        // Establish a caller-owned ambient activity and run the saga inside it. With no OrionSaga
+        // listener registered the run must start no span of its own, so the caller's ambient activity
+        // must remain current and unchanged across the call: the run neither replaces nor clears it.
+        // A dedicated listener makes the ambient activity real (StartActivity samples it); it is scoped
+        // to ONLY the ambient source so it cannot observe the saga source.
+        const string ambientSourceName = "Moongazing.OrionSaga.Tests.Ambient";
+        using var ambientSource = new ActivitySource(ambientSourceName);
+        using var ambientListener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == ambientSourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+        };
+        ActivitySource.AddActivityListener(ambientListener);
+
+        using var ambient = ambientSource.StartActivity("ambient", ActivityKind.Internal);
+        Assert.NotNull(ambient);
+        Assert.Same(ambient, Activity.Current);
 
         Activity? observedInsideStep = null;
         var saga = new SagaBuilder<object>()
@@ -263,10 +338,12 @@ public sealed class SagaTracingTests
         Assert.True(result.Failed);
         Assert.True(result.RolledBackCleanly);
 
-        // No span was started for the source: the step saw no OrionSaga activity as current, and the
-        // ambient activity is untouched after the run.
-        Assert.Same(before, Activity.Current);
-        Assert.Null(observedInsideStep);
+        // No OrionSaga span was started: the step saw the caller's ambient activity as current (not a
+        // saga span), and after the run the ambient activity is preserved (non-null and still current),
+        // proving the no-listener path neither pushes nor clears the ambient activity.
+        Assert.Same(ambient, observedInsideStep);
+        Assert.NotNull(Activity.Current);
+        Assert.Same(ambient, Activity.Current);
     }
 }
 

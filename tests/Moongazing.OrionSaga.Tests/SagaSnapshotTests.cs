@@ -147,6 +147,41 @@ public sealed class SagaSnapshotTests
     }
 
     [Fact]
+    public async Task The_snapshot_collections_cannot_be_down_cast_to_a_mutable_array_and_mutated()
+    {
+        var recorder = new SnapshotRecorder();
+        var saga = new SagaBuilder<object>()
+            .WithObserver(recorder)
+            .AddStep("a", (_, _) => Task.CompletedTask)
+            .AddStep("b", (_, _) => Task.CompletedTask)
+            .AddStep("c", (_, _) => Task.CompletedTask)
+            .AddStep("d", (_, _) => Task.CompletedTask)
+            .Build();
+
+        await saga.RunAsync(new object());
+
+        // Before step c, a and b have completed and d is still pending; this snapshot has a non-empty
+        // completed set and a non-empty pending set, so both leak vectors can be probed.
+        var beforeC = recorder.Snapshots[2];
+        Assert.Equal(["a", "b"], Names(beforeC.CompletedSteps));
+        Assert.Equal(["d"], Names(beforeC.PendingSteps));
+
+        // The reported lists must not be a plain StepReference[] that a caller could down-cast and
+        // mutate. Against the unfixed code (which returned the executor's StepReference[] as
+        // IReadOnlyList) these casts SUCCEED, the writes below mutate the snapshot, and the trailing
+        // assertions fail -- this test is RED until the snapshot exposes a truly immutable collection.
+        Assert.Null(beforeC.CompletedSteps as StepReference[]);
+        Assert.Null(beforeC.PendingSteps as StepReference[]);
+        Assert.Null(beforeC.WouldCompensate as StepReference[]);
+
+        // Mutating an enumerated copy must not touch the snapshot, and re-reading returns the originals.
+        var copy = beforeC.CompletedSteps.ToArray();
+        copy[0] = new StepReference("hacked", 99);
+        Assert.Equal(["a", "b"], Names(beforeC.CompletedSteps));
+        Assert.Equal(["b", "a"], Names(beforeC.WouldCompensate));
+    }
+
+    [Fact]
     public async Task A_run_with_no_observer_does_not_build_snapshots_and_behaves_unchanged()
     {
         // No WithObserver: OnProgress is never called and no snapshot is built (the no-observer path is

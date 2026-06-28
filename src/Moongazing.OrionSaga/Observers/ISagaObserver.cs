@@ -111,6 +111,11 @@ public interface ISagaObserver
     /// runs (with that step as the current step) and once after the final step completes (with no
     /// current step). It is not fired during rollback; the existing compensation notifications report
     /// that phase. Like every notification, a fault it raises is swallowed and never disrupts the run.
+    /// This callback runs before the step's duration measurement starts, so the time spent in an
+    /// <see cref="OnProgress"/> handler is not counted toward the <c>duration</c> reported to
+    /// <see cref="OnStepCompleted(string, int, TimeSpan)"/> or
+    /// <see cref="OnStepFailed(string, Exception, int, TimeSpan)"/>: the reported duration reflects the
+    /// forward action alone.
     /// </remarks>
     /// <param name="snapshot">The read-only view of the run at this point.</param>
     void OnProgress(SagaRunSnapshot snapshot)
