@@ -1,5 +1,9 @@
 namespace Moongazing.OrionSaga.Orchestration;
 
+using System.Diagnostics;
+
+using Moongazing.OrionSaga.Diagnostics;
+
 /// <summary>
 /// A set of independent steps run concurrently within one stage of a saga. The group is opt-in: a saga
 /// stays sequential unless a group is added via <see cref="SagaBuilder{TContext}.AddParallelGroup"/>.
@@ -129,6 +133,40 @@ internal sealed class ParallelStepGroup<TContext>
     }
 
     private static async Task RunMemberAsync(
+        SagaStep<TContext> member, TContext context, CancellationToken cancellationToken)
+    {
+        // Start a member span as a child of the group's step span (the current Activity when the group
+        // fans out). Null when no listener, so the no-listener path starts no Activity. The span covers
+        // the member's retries and timeout so its duration reflects the whole member forward run, and
+        // its outcome is tagged once the member completes or faults. Each concurrent member gets its own
+        // span, and they nest under the group span because Activity.Current is the group span here.
+        using var memberActivity = SagaActivitySource.Source.StartActivity(
+            SagaActivitySource.StepActivityName, ActivityKind.Internal);
+        if (memberActivity is not null)
+        {
+            memberActivity.SetTag(SagaActivitySource.StepNameTag, member.Name);
+        }
+
+        try
+        {
+            await RunMemberCoreAsync(member, context, cancellationToken).ConfigureAwait(false);
+            memberActivity?.SetTag(SagaActivitySource.OutcomeTag, "completed");
+        }
+        catch (OperationCanceledException)
+        {
+            memberActivity?.SetTag(SagaActivitySource.OutcomeTag, "cancelled");
+            throw;
+        }
+#pragma warning disable CA1031 // tag the member span's outcome, then rethrow for the group's failure path
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            memberActivity?.SetTag(SagaActivitySource.OutcomeTag, "failed");
+            throw;
+        }
+    }
+
+    private static async Task RunMemberCoreAsync(
         SagaStep<TContext> member, TContext context, CancellationToken cancellationToken)
     {
         // Honour a member's own forward retry and per-step timeout so a group member is as resilient as

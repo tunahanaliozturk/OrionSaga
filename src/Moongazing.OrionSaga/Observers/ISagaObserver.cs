@@ -1,5 +1,7 @@
 namespace Moongazing.OrionSaga.Observers;
 
+using Moongazing.OrionSaga.Orchestration;
+
 /// <summary>
 /// Consumer hook notified about saga progress, for logging and alerting. Implementations are
 /// observability only: they must not throw, and the executor swallows any fault they raise so an
@@ -96,6 +98,24 @@ public interface ISagaObserver
     /// <param name="duration">How long the compensation ran before it failed.</param>
     void OnCompensationFailed(string stepName, Exception exception, int ordinal, TimeSpan duration) =>
         OnCompensationFailed(stepName, exception);
+
+    /// <summary>
+    /// Called after each forward transition with a read-only snapshot of the run in progress: the
+    /// step now running, the steps that have completed (and would compensate), and the steps not yet
+    /// reached. The default is a no-op so existing observers are unaffected; override it to inspect a
+    /// run mid-flight for diagnostics or tests. The snapshot is immutable and self-contained, so it can
+    /// be retained and read after the run returns without exposing the executor's mutable state.
+    /// </summary>
+    /// <remarks>
+    /// Fired only while there is forward progress to report: once before each step's forward action
+    /// runs (with that step as the current step) and once after the final step completes (with no
+    /// current step). It is not fired during rollback; the existing compensation notifications report
+    /// that phase. Like every notification, a fault it raises is swallowed and never disrupts the run.
+    /// </remarks>
+    /// <param name="snapshot">The read-only view of the run at this point.</param>
+    void OnProgress(SagaRunSnapshot snapshot)
+    {
+    }
 }
 
 /// <summary>A no-op observer used when the consumer registers none.</summary>
