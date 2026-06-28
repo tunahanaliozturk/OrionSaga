@@ -272,6 +272,63 @@ public sealed class SagaCompositionCorrectnessTests
         Assert.Contains(new Note("compensationFailed", "fanout/m0", 1), observer.Notes);
     }
 
+    // ---- A parallel-group member that overruns its per-step timeout reports TimedOut ----
+
+    [Fact]
+    public async Task A_group_member_that_overruns_its_per_step_timeout_reports_the_TimedOut_outcome()
+    {
+        var ledger = new Ledger();
+
+        // A single-member group whose member hangs until its own per-step deadline fires. The deadline is
+        // the only thing that ends the run, so the member overrun must surface as a timeout, not a generic
+        // failure. Deterministic: the member blocks on an infinite delay that the per-step timeout cancels.
+        var saga = new SagaBuilder<Ledger>()
+            .AddParallelGroup("fanout", group => group
+                .AddStep(
+                    "slow",
+                    async (_, ct) => await Task.Delay(Timeout.Infinite, ct),
+                    timeout: TimeSpan.FromMilliseconds(20)))
+            .Build();
+
+        var result = await saga.RunAsync(ledger);
+
+        // The member deadline overrun is preserved through the group to the parent result: the run is a
+        // cancellation tagged TimedOut, reported against the group slot, not a generic Failed.
+        Assert.Equal(SagaOutcome.Cancelled, result.Outcome);
+        Assert.True(result.TimedOut);
+        Assert.Equal("fanout", result.FailedStep);
+        Assert.True(result.RolledBackCleanly);
+    }
+
+    [Fact]
+    public async Task A_member_timeout_is_reported_as_TimedOut_even_when_a_sibling_fails_generically_first()
+    {
+        var ledger = new Ledger();
+
+        // Two members settle differently: m-fail throws a generic fault immediately, m-slow overruns its
+        // own per-step deadline. The group waits for both (Task.WhenAll), then surfaces a failure. The
+        // member deadline overrun must take priority so the run reports TimedOut, not the sibling's generic
+        // fault -- proving a timeout is never masked by another member's failure or by declaration order.
+        // m-fail is declared first, so under the unfixed first-faulted-in-order behaviour its generic fault
+        // would surface and the run would be a plain Failed: this test is RED against that code.
+        var saga = new SagaBuilder<Ledger>()
+            .AddParallelGroup("fanout", group => group
+                .AddStep(
+                    "m-fail",
+                    (_, _) => throw new InvalidOperationException("generic-boom"))
+                .AddStep(
+                    "m-slow",
+                    async (_, ct) => await Task.Delay(Timeout.Infinite, ct),
+                    timeout: TimeSpan.FromMilliseconds(20)))
+            .Build();
+
+        var result = await saga.RunAsync(ledger);
+
+        Assert.Equal(SagaOutcome.Cancelled, result.Outcome);
+        Assert.True(result.TimedOut);
+        Assert.Equal("fanout", result.FailedStep);
+    }
+
     // ---- Finding 4: rollback ordinals stay correct after a skipped step ----
 
     [Fact]

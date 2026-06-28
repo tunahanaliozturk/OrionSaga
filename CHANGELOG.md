@@ -6,6 +6,41 @@ All notable changes to OrionSaga are documented in this file. The format is base
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-28
+
+### Added
+
+- Activity / tracing integration: the executor now emits a `System.Diagnostics.Activity` span per saga
+  run, per step forward action, and per compensation, from a new `ActivitySource` named
+  `Moongazing.OrionSaga` (the same name as the `SagaDiagnostics` meter, so one subscription string wires
+  up both traces and metrics; the source and its tag/span-name constants are exposed on the new
+  `SagaActivitySource` class). The step spans nest under the run span and a parallel group's member spans
+  nest under the group's slot span, so a trace shows the orchestration shape. Each span carries the step
+  name and one-based ordinal, and an outcome tag (`completed` / `skipped` / `failed` / `cancelled` /
+  `timedout` for steps, `compensated` / `failed` / `timedout` for compensations, and the run outcome on
+  the run span); span duration reflects how long the action ran. `ActivitySource.StartActivity` returns
+  null when no listener is registered, so the no-listener happy path starts no `Activity`, sets no tags,
+  and allocates nothing for tracing; the existing no-observer happy path is otherwise byte-for-byte as in
+  0.5.0.
+- Saga-state inspection: a read-only `SagaRunSnapshot` of a run in progress, handed to the new default
+  no-op `ISagaObserver.OnProgress(SagaRunSnapshot)` notification before each step runs and once when the
+  run completes. The snapshot reports the current step, the completed steps (in run order, which is what
+  would compensate), the pending steps, and `WouldCompensate` (the completed steps in reverse unwind
+  order), each as an immutable `StepReference` of name and ordinal. It copies the names and ordinals it
+  reports into its own arrays at the moment it is taken, so it exposes none of the executor's mutable
+  internals and a snapshot held past the run still reads the state it captured. `OnProgress` is a default
+  interface method, so existing observers are unaffected, and like every notification it is gated on a
+  real observer being registered: the no-observer path builds no snapshot and a fault it raises is
+  swallowed.
+
+### Notes
+
+- All additions are opt-in and additive. With no `ActivityListener` and no observer registered, the
+  forward run, compensation, `SagaResult`, observer behaviour, and per-run allocation are unchanged from
+  0.5.0. A separate test-helper package (recording observers and assertion helpers as their own package)
+  remains planned and is not part of this release; the recording observers and the captured-listener
+  harness used to verify this milestone live in the test project for now.
+
 ## [0.5.0] - 2026-06-27
 
 ### Added
@@ -160,6 +195,7 @@ Initial release. In-process saga orchestration.
 compensation-failure isolation, empty saga, cancellation rollback, observer notifications and fault
 isolation, and registration.
 
+[0.6.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.3.0

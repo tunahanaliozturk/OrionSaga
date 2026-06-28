@@ -1,5 +1,9 @@
 namespace Moongazing.OrionSaga.Orchestration;
 
+using System.Diagnostics;
+
+using Moongazing.OrionSaga.Diagnostics;
+
 /// <summary>
 /// A set of independent steps run concurrently within one stage of a saga. The group is opt-in: a saga
 /// stays sequential unless a group is added via <see cref="SagaBuilder{TContext}.AddParallelGroup"/>.
@@ -12,9 +16,11 @@ namespace Moongazing.OrionSaga.Orchestration;
 /// Forward: every member whose own condition holds has its forward action started concurrently and the
 /// group waits for all of them. If every started member completes, the group completes and the parent
 /// may later roll it back. If any member faults, the group waits for the in-flight members to settle and
-/// then surfaces the first member failure so the parent rolls back the group's completed members and the
-/// stages that ran before it. The faulted member is not compensated, since its forward action did not
-/// complete, exactly as for a single failed step.
+/// then surfaces a member failure so the parent rolls back the group's completed members and the stages
+/// that ran before it. A member that overran its own per-step timeout takes priority when surfacing, so
+/// a member deadline overrun is reported as a timeout (the parent's TimedOut outcome) rather than being
+/// masked by a sibling's generic fault or by declaration order. The faulted member is not compensated,
+/// since its forward action did not complete, exactly as for a single failed step.
 /// </para>
 /// <para>
 /// Compensation is never performed inline by the group. Both after an in-group member fault and when a
@@ -131,6 +137,49 @@ internal sealed class ParallelStepGroup<TContext>
     private static async Task RunMemberAsync(
         SagaStep<TContext> member, TContext context, CancellationToken cancellationToken)
     {
+        // Start a member span as a child of the group's step span (the current Activity when the group
+        // fans out). Null when no listener, so the no-listener path starts no Activity. The span covers
+        // the member's retries and timeout so its duration reflects the whole member forward run, and
+        // its outcome is tagged once the member completes or faults. Each concurrent member gets its own
+        // span, and they nest under the group span because Activity.Current is the group span here.
+        using var memberActivity = SagaActivitySource.Source.StartActivity(
+            SagaActivitySource.StepActivityName, ActivityKind.Internal);
+        if (memberActivity is not null)
+        {
+            memberActivity.SetTag(SagaActivitySource.StepNameTag, member.Name);
+        }
+
+        try
+        {
+            await RunMemberCoreAsync(member, context, cancellationToken).ConfigureAwait(false);
+            memberActivity?.SetTag(SagaActivitySource.OutcomeTag, "completed");
+        }
+        catch (SagaStepTimeoutException)
+        {
+            // A member that overran its own per-step deadline is tagged "timedout", distinct from an
+            // ordinary cancellation, so the member span matches the run-level TimedOut outcome the parent
+            // reports. SagaStepTimeoutException derives from OperationCanceledException, so this filter
+            // must precede the plain cancellation catch below.
+            memberActivity?.SetTag(SagaActivitySource.OutcomeTag, "timedout");
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            memberActivity?.SetTag(SagaActivitySource.OutcomeTag, "cancelled");
+            throw;
+        }
+#pragma warning disable CA1031 // tag the member span's outcome, then rethrow for the group's failure path
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            memberActivity?.SetTag(SagaActivitySource.OutcomeTag, "failed");
+            throw;
+        }
+    }
+
+    private static async Task RunMemberCoreAsync(
+        SagaStep<TContext> member, TContext context, CancellationToken cancellationToken)
+    {
         // Honour a member's own forward retry and per-step timeout so a group member is as resilient as
         // a standalone step. A member with neither runs its forward action once, directly.
         if (member.ForwardRetry is not { } retry)
@@ -188,6 +237,28 @@ internal sealed class ParallelStepGroup<TContext>
 
     private static void ThrowFirstFailure(Task[] tasks)
     {
+        // A member that overran its per-step deadline takes priority over every other settled outcome, so
+        // a member timeout is never masked by a sibling's generic fault or by array order. Without this,
+        // the first faulted task in declaration order would surface, and a group whose member genuinely
+        // timed out would be misreported as a plain Failed instead of TimedOut. Surfacing the timeout
+        // preserves the TimedOut outcome through the group to the parent's result, observer, and span.
+        //
+        // A timed-out member's task does not land Faulted: SagaStepTimeoutException derives from
+        // OperationCanceledException, and because it is thrown while the awaited per-step token was
+        // cancelled the TPL marks the task Canceled (so task.Exception is null on it). The deadline must
+        // therefore be detected by extracting each task's exception, not by reading task.Exception.
+        foreach (var task in tasks)
+        {
+            if (TryGetException(task) is SagaStepTimeoutException timeout)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(timeout).Throw();
+            }
+        }
+
+        // No member timed out: surface the first settled non-success in declaration order. A faulted
+        // member rethrows its original exception; a cancelled member surfaces as a cancellation so the
+        // parent reports the group as a cancellation rather than a business failure, consistent with a
+        // single cancelled step.
         foreach (var task in tasks)
         {
             if (task.IsFaulted && task.Exception is { } aggregate)
@@ -198,10 +269,37 @@ internal sealed class ParallelStepGroup<TContext>
 
             if (task.IsCanceled)
             {
-                // A cancelled member surfaces as a cancellation so the parent reports the group as a
-                // cancellation rather than a business failure, consistent with a single cancelled step.
                 task.GetAwaiter().GetResult();
             }
         }
+    }
+
+    // Extract a settled task's exception without throwing, covering both a Faulted task (exception on
+    // task.Exception) and a Canceled task (no task.Exception; the original OperationCanceledException is
+    // surfaced only by observing the result). Returns null for a task that completed successfully. Used to
+    // find a member deadline overrun, whose SagaStepTimeoutException lands the member task Canceled.
+    private static Exception? TryGetException(Task task)
+    {
+        if (task.IsFaulted)
+        {
+            var aggregate = task.Exception;
+            return aggregate?.InnerException ?? aggregate;
+        }
+
+        if (task.IsCanceled)
+        {
+            try
+            {
+                task.GetAwaiter().GetResult();
+            }
+#pragma warning disable CA1031 // peek the cancellation/timeout exception without disturbing the task
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                return ex;
+            }
+        }
+
+        return null;
     }
 }

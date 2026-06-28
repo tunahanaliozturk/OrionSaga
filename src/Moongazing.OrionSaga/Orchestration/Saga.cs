@@ -1,5 +1,6 @@
 namespace Moongazing.OrionSaga.Orchestration;
 
+using System.Collections.Immutable;
 using System.Diagnostics;
 
 using Moongazing.OrionSaga.Diagnostics;
@@ -69,6 +70,14 @@ public sealed class Saga<TContext>
     /// <param name="cancellationToken">Cancels forward progress (rollback still runs).</param>
     public async Task<SagaResult> RunAsync(TContext context, CancellationToken cancellationToken = default)
     {
+        // Start the run span. StartActivity returns null when no listener is registered for the source,
+        // so the no-listener happy path allocates no Activity, sets no tags, and pays nothing for
+        // tracing. When a listener is present, every step and compensation span nests under this run
+        // span automatically via Activity.Current. The span is disposed when the run returns, recording
+        // its duration; its outcome tag is set just before each return.
+        using var runActivity = SagaActivitySource.Source.StartActivity(
+            SagaActivitySource.RunActivityName, ActivityKind.Internal);
+
         // Default capacity: the stack grows only as steps complete. Pre-sizing to steps.Count would
         // eagerly allocate the full backing array, which a saga that fails or is cancelled early over
         // a large step list never needs, so let it grow to match the steps that actually complete. Each
@@ -89,11 +98,24 @@ public sealed class Saga<TContext>
         {
             ordinal++;
 
+            // Report the run state to an observer before the step runs: this step is the current one,
+            // the completed stack is what would compensate, and the rest are pending. Gated on
+            // hasObserver so the no-observer path builds no snapshot and allocates nothing.
+            NotifyProgress(completed, currentStep: new StepReference(step.Name, ordinal), nextIndex: ordinal);
+
             // Only measure forward-action duration when a real observer will consume it. The timing
             // source is allocation-free (a struct timestamp, no Stopwatch object), and gating it on
             // hasObserver keeps the no-observer happy path byte-for-byte as it was: no timestamp read,
-            // no duration computed.
+            // no duration computed. The timestamp is taken AFTER the progress notification so the
+            // observer's OnProgress handler time is not counted against the step's measured duration:
+            // the duration reflects the forward action alone, not the callback that announced it.
             var startTimestamp = hasObserver ? Stopwatch.GetTimestamp() : 0L;
+
+            // Start the step span as a child of the run span. Null when no listener, so the no-listener
+            // path starts no Activity and tags nothing. Tags carry the step name and ordinal; the
+            // outcome tag is set below once the step completes, is skipped, or fails. Disposed at the
+            // end of the iteration, recording the step's duration.
+            using var stepActivity = StartStepActivity(step.Name, ordinal);
 
             try
             {
@@ -106,6 +128,7 @@ public sealed class Saga<TContext>
                 if (step.Condition is { } condition && !condition(context))
                 {
                     skipped++;
+                    SetOutcome(stepActivity, "skipped");
                     NotifyStepSkipped(step.Name, ordinal);
                     continue;
                 }
@@ -113,10 +136,13 @@ public sealed class Saga<TContext>
                 await ExecuteStep(step, context, cancellationToken).ConfigureAwait(false);
                 completed.Push(new CompletedStep(step, ordinal));
                 diagnostics?.RecordStep(completed: true);
+                SetOutcome(stepActivity, "completed");
                 NotifyStepCompleted(step.Name, ordinal, startTimestamp);
             }
             catch (OperationCanceledException ex)
             {
+                SetOutcome(stepActivity, ex is SagaStepTimeoutException ? "timedout" : "cancelled");
+                SetRunOutcome(runActivity, ex is SagaStepTimeoutException ? "timedout" : "cancelled");
                 // A cancellation is not a business failure: it is either the caller cancelling or the
                 // step overrunning its per-step timeout. Either way, roll back and report it distinctly.
                 // TimedOut is reported only when the per-step deadline genuinely elapsed: ExecuteStep
@@ -129,6 +155,9 @@ public sealed class Saga<TContext>
                 diagnostics?.RecordStep(completed: false);
                 NotifyStepFailed(step.Name, ex, ordinal, startTimestamp);
 
+                // Close the step span before rolling back so the compensation spans nest under the run
+                // span, not under the faulted step's span. A no-op when no listener (stepActivity null).
+                stepActivity?.Dispose();
                 var rollback = await CompensateAsync(completed, step, ordinal, context).ConfigureAwait(false);
                 diagnostics?.RecordRun(succeeded: false);
                 return SagaResult.CreateCancelled(
@@ -139,10 +168,15 @@ public sealed class Saga<TContext>
             catch (Exception ex)
 #pragma warning restore CA1031
             {
+                SetOutcome(stepActivity, "failed");
+                SetRunOutcome(runActivity, "failed");
                 var completedCount = CountCompleted(completed);
                 diagnostics?.RecordStep(completed: false);
                 NotifyStepFailed(step.Name, ex, ordinal, startTimestamp);
 
+                // Close the step span before rolling back so the compensation spans nest under the run
+                // span, not under the faulted step's span. A no-op when no listener (stepActivity null).
+                stepActivity?.Dispose();
                 var rollback = await CompensateAsync(completed, step, ordinal, context).ConfigureAwait(false);
                 diagnostics?.RecordRun(succeeded: false);
                 return SagaResult.CreateFailed(
@@ -151,6 +185,10 @@ public sealed class Saga<TContext>
             }
         }
 
+        // The run completed every step. Report the terminal state (no current step) before returning so
+        // an observer sees the final completed set, then tag the run span succeeded.
+        NotifyProgress(completed, currentStep: null, nextIndex: ordinal);
+        SetRunOutcome(runActivity, "succeeded");
         diagnostics?.RecordRun(succeeded: true);
         return SagaResult.CreateSuccess(CountCompleted(completed), skipped);
     }
@@ -264,6 +302,11 @@ public sealed class Saga<TContext>
         {
             var startTimestamp = hasObserver ? Stopwatch.GetTimestamp() : 0L;
 
+            // Start a compensation span as a child of the run span (the step spans are already closed),
+            // tagged with the step name and the forward ordinal it ran at. Null when no listener, so the
+            // no-listener rollback path allocates no Activity. The outcome tag is set below.
+            using var compensationActivity = StartCompensationActivity(unit.Step.Name, unit.Ordinal);
+
             // If the rollback budget has already elapsed, the remaining units cannot compensate. Record
             // each as a budget-driven failure so the result reflects that their effects may linger.
             if (rollbackToken.IsCancellationRequested)
@@ -272,6 +315,7 @@ public sealed class Saga<TContext>
                 var cancelled = new OperationCanceledException(rollbackToken);
                 failures.Add(new CompensationFailure(unit.Step.Name, cancelled));
                 diagnostics?.RecordCompensation(compensated: false);
+                SetOutcome(compensationActivity, "timedout");
                 NotifyCompensationFailed(unit.Step.Name, cancelled, unit.Ordinal, startTimestamp);
                 continue;
             }
@@ -281,6 +325,7 @@ public sealed class Saga<TContext>
                 await CompensateStep(unit.Step, context, rollbackToken).ConfigureAwait(false);
                 compensated++;
                 diagnostics?.RecordCompensation(compensated: true);
+                SetOutcome(compensationActivity, "compensated");
                 NotifyCompensated(unit.Step.Name, unit.Ordinal, startTimestamp);
             }
             catch (OperationCanceledException ex) when (rollbackToken.IsCancellationRequested)
@@ -289,6 +334,7 @@ public sealed class Saga<TContext>
                 rollbackTimedOut = true;
                 failures.Add(new CompensationFailure(unit.Step.Name, ex));
                 diagnostics?.RecordCompensation(compensated: false);
+                SetOutcome(compensationActivity, "timedout");
                 NotifyCompensationFailed(unit.Step.Name, ex, unit.Ordinal, startTimestamp);
             }
 #pragma warning disable CA1031 // record a compensation fault but keep rolling back the remaining units
@@ -300,6 +346,7 @@ public sealed class Saga<TContext>
                 // an ordinary step and for a parallel group member, since both arrive here as a unit.
                 failures.Add(new CompensationFailure(unit.Step.Name, ex));
                 diagnostics?.RecordCompensation(compensated: false);
+                SetOutcome(compensationActivity, "failed");
                 NotifyCompensationFailed(unit.Step.Name, ex, unit.Ordinal, startTimestamp);
             }
         }
@@ -514,4 +561,113 @@ public sealed class Saga<TContext>
             // An observer fault must never disrupt orchestration or rollback.
         }
     }
+
+    // Build and hand a read-only snapshot of the in-progress run to the observer. Gated on hasObserver
+    // so the no-observer path builds no snapshot and allocates nothing: it is never called there.
+    // currentStep is the step about to run (null at terminal); nextIndex is the one-based ordinal of
+    // that step (the count of steps reached so far), so pending steps are the declared steps after it.
+    private void NotifyProgress(Stack<CompletedStep> completed, StepReference? currentStep, int nextIndex)
+    {
+        if (!hasObserver)
+        {
+            return;
+        }
+
+        try
+        {
+            observer.OnProgress(BuildSnapshot(completed, currentStep, nextIndex));
+        }
+#pragma warning disable CA1031 // observer is observability, not load-bearing
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            // An observer fault must never disrupt orchestration or rollback.
+        }
+    }
+
+    // Copy the executor's live completed stack and remaining step list into immutable arrays so the
+    // snapshot exposes nothing mutable. Completed steps are reported oldest-first (the order they ran),
+    // matching CompletedSteps' contract; the stack iterates newest-first, so it is reversed here.
+    private SagaRunSnapshot BuildSnapshot(Stack<CompletedStep> completed, StepReference? currentStep, int nextIndex)
+    {
+        // Copy the live completed stack and the remaining step list into immutable arrays so the snapshot
+        // exposes nothing the caller can mutate. The builders are sized exactly, so each MoveToImmutable
+        // transfers the backing array with no extra copy.
+        ImmutableArray<StepReference> completedRefs;
+        if (completed.Count == 0)
+        {
+            completedRefs = ImmutableArray<StepReference>.Empty;
+        }
+        else
+        {
+            var completedBuilder = ImmutableArray.CreateBuilder<StepReference>(completed.Count);
+            completedBuilder.Count = completed.Count;
+
+            // Stack enumeration yields newest-first; place each at its oldest-first index so
+            // CompletedSteps reads in run order and WouldCompensate (its reverse) reads in unwind order.
+            var i = completed.Count - 1;
+            foreach (var entry in completed)
+            {
+                completedBuilder[i] = new StepReference(entry.Step.Name, entry.Ordinal);
+                i--;
+            }
+
+            completedRefs = completedBuilder.MoveToImmutable();
+        }
+
+        // Pending steps are the declared steps after the current one. nextIndex is the current step's
+        // one-based ordinal, so declared steps at index nextIndex onward have not run yet. At the
+        // terminal call (currentStep null, nextIndex == steps.Count) this is empty.
+        var pendingCount = steps.Count - nextIndex;
+        ImmutableArray<StepReference> pending;
+        if (pendingCount <= 0)
+        {
+            pending = ImmutableArray<StepReference>.Empty;
+        }
+        else
+        {
+            var pendingBuilder = ImmutableArray.CreateBuilder<StepReference>(pendingCount);
+            for (var p = 0; p < pendingCount; p++)
+            {
+                var index = nextIndex + p;
+                pendingBuilder.Add(new StepReference(steps[index].Name, index + 1));
+            }
+
+            pending = pendingBuilder.MoveToImmutable();
+        }
+
+        return new SagaRunSnapshot(currentStep, completedRefs, pending, steps.Count);
+    }
+
+    // Start a step span as a child of the current run span, tagged with the step name and ordinal.
+    // Returns null when no listener is registered, so the no-listener path allocates no Activity.
+    private static Activity? StartStepActivity(string stepName, int ordinal) =>
+        StartTaggedActivity(SagaActivitySource.StepActivityName, stepName, ordinal);
+
+    // Start a compensation span as a child of the current run span, tagged with the step name and the
+    // forward ordinal it ran at. Returns null when no listener is registered.
+    private static Activity? StartCompensationActivity(string stepName, int ordinal) =>
+        StartTaggedActivity(SagaActivitySource.CompensationActivityName, stepName, ordinal);
+
+    private static Activity? StartTaggedActivity(string activityName, string stepName, int ordinal)
+    {
+        var activity = SagaActivitySource.Source.StartActivity(activityName, ActivityKind.Internal);
+        if (activity is null)
+        {
+            // No listener: nothing was started, so there is nothing to tag. The hot path stops here.
+            return null;
+        }
+
+        activity.SetTag(SagaActivitySource.StepNameTag, stepName);
+        activity.SetTag(SagaActivitySource.StepOrdinalTag, ordinal);
+        return activity;
+    }
+
+    // Tag a step or compensation span's outcome. A no-op when the activity is null (no listener).
+    private static void SetOutcome(Activity? activity, string outcome) =>
+        activity?.SetTag(SagaActivitySource.OutcomeTag, outcome);
+
+    // Tag the run span's outcome. A no-op when the activity is null (no listener).
+    private static void SetRunOutcome(Activity? activity, string outcome) =>
+        activity?.SetTag(SagaActivitySource.OutcomeTag, outcome);
 }

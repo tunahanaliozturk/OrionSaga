@@ -2,17 +2,19 @@
 
 Where OrionSaga has been and where it might go next.
 
-Current release: **0.5.0**. An in-process saga orchestrator that runs an ordered set of steps over a
+Current release: **0.6.0**. An in-process saga orchestrator that runs an ordered set of steps over a
 shared context and compensates the completed steps in reverse order when one fails, cancels, or
-overruns its timeout, with opt-in per-step retry, compensation retry, a bounded rollback budget, and
-composition and control flow: conditional steps, sub-sagas, and parallel step groups.
+overruns its timeout, with opt-in per-step retry, compensation retry, a bounded rollback budget,
+composition and control flow (conditional steps, sub-sagas, and parallel step groups), and
+observability: meter counters, `Activity` tracing spans per run / step / compensation, and a read-only
+in-progress run snapshot.
 
 This document records what has shipped and lays out a forward plan. The shipped section is fact. The
 forward plan is a direction with rough version targets, not a contract: items move, merge, and get
 dropped as real usage shows what matters. If you want something here, open an issue and describe the
 workload that needs it; demand is what moves an idea forward.
 
-For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, 0.3.0, 0.4.0, and 0.5.0 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
+For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, 0.3.0, 0.4.0, 0.5.0, and 0.6.0 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
 
 ---
 
@@ -35,6 +37,25 @@ unwind them cleanly when one fails. Any addition is weighed against that focus.
 ## Released
 
 What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the full history.
+
+### 0.6.0
+
+- **Activity / tracing integration.** The executor emits a `System.Diagnostics.Activity` span per saga
+  run, per step, and per compensation, from an `ActivitySource` named `Moongazing.OrionSaga` (the same
+  name as the meter, exposed with its tag and span-name constants on `SagaActivitySource`). Step spans
+  nest under the run span and a parallel group's member spans nest under the group's slot span, so a
+  trace shows the orchestration shape next to the meter counters. Each span carries the step name,
+  one-based ordinal, an outcome tag, and a duration. `StartActivity` returns null when no listener is
+  registered, so the no-listener happy path starts no `Activity` and allocates nothing for tracing.
+- **Saga-state inspection.** A read-only `SagaRunSnapshot` of a run in progress (current step, completed
+  steps, pending steps, and `WouldCompensate`), handed to the new default no-op
+  `ISagaObserver.OnProgress(SagaRunSnapshot)` before each step and once at completion. The snapshot
+  copies the names and ordinals it reports into immutable arrays, so it exposes none of the executor's
+  mutable internals. `OnProgress` is a default interface method gated on a real observer, so existing
+  observers and the no-observer happy path are unaffected.
+- All additions are opt-in and additive: with no `ActivityListener` and no observer registered, the
+  forward run, compensation, `SagaResult`, observer behaviour, and per-run allocation are unchanged from
+  0.5.0.
 
 ### 0.5.0
 
@@ -144,12 +165,13 @@ Composition and control flow (conditional steps, sub-sagas, and parallel step gr
 
 ### Observability and tooling, alongside the above
 
-- **Activity / tracing integration.** Emit a `System.Diagnostics.Activity` span per saga run and per
-  step so traces show the orchestration shape next to the existing meter counters.
-- **Saga-state inspection.** A read-only view of a run in progress (current step, completed steps,
-  what would compensate) for diagnostics and tests, without exposing mutable internals.
+Activity / tracing integration and saga-state inspection shipped in 0.6.0; see the Released section
+above. What remains here:
+
 - **Test helper package.** Recording observers and assertion helpers for verifying step and
-  compensation order without hand-rolling them in each test.
+  compensation order without hand-rolling them in each test. Still planned as its own package; the
+  recording observers and captured-listener harness used to verify the 0.6.0 tracing and snapshot work
+  currently live in the OrionSaga test project rather than a shipped package.
 
 ### Companion packages (opt-in, outside the core)
 
