@@ -1,6 +1,6 @@
 # OrionSaga Features
 
-A complete reference of what OrionSaga does today, at version **0.1.0**. Every item here maps to a
+A complete reference of what OrionSaga does today, at version **0.7.0**. Every item here maps to a
 public type or behavior in the shipped library. For where the library may go next, see
 [ROADMAP.md](ROADMAP.md).
 
@@ -127,13 +127,13 @@ registered, an internal `NullSagaObserver` no-op is used.
 ## 8. Diagnostics and metrics
 
 `SagaDiagnostics` exposes a `System.Diagnostics.Metrics.Meter` named `Moongazing.OrionSaga` (the
-`SagaDiagnostics.MeterName` constant) with three counters, each tagged with an `outcome`:
+`SagaDiagnostics.MeterName` constant) with three counters, each tagged with `orion.outcome`:
 
 | Instrument | Tag values |
 |------------|------------|
-| `orionsaga.runs` | `succeeded` / `failed` |
-| `orionsaga.steps` | `completed` / `failed` |
-| `orionsaga.compensations` | `compensated` / `failed` |
+| `orion.saga.runs` | `succeeded` / `failed` |
+| `orion.saga.steps` | `completed` / `failed` |
+| `orion.saga.compensations` | `compensated` / `failed` |
 
 Attach an instance with `WithDiagnostics` and subscribe with OpenTelemetry by meter name.
 `SagaDiagnostics` owns the meter and is `IDisposable`.
@@ -160,7 +160,7 @@ concurrently with different context instances.
 ## 11. Multi-targeting and dependencies
 
 - Targets `net8.0`, `net9.0`, and `net10.0`.
-- The only runtime dependency is `Microsoft.Extensions.DependencyInjection.Abstractions`.
+- The runtime dependencies are `Microsoft.Extensions.DependencyInjection.Abstractions` and `Orion.Abstractions` (the family's shared contracts spine).
 - Built with nullable reference types enabled, latest analyzers, and `TreatWarningsAsErrors`.
 - Ships an XML documentation file and a symbol package.
 </content>

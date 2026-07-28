@@ -46,7 +46,7 @@ public sealed class SagaDiagnosticsTests
             string outcome = "none";
             foreach (var tag in tags)
             {
-                if (tag.Key == "outcome")
+                if (tag.Key == "orion.outcome")
                 {
                     outcome = tag.Value?.ToString() ?? "none";
                 }
@@ -85,11 +85,11 @@ public sealed class SagaDiagnosticsTests
 
         await saga.RunAsync(new object());
 
-        Assert.Equal(1, recorder.Count("orionsaga.runs:succeeded"));
-        Assert.Equal(0, recorder.Count("orionsaga.runs:failed"));
-        Assert.Equal(2, recorder.Count("orionsaga.steps:completed"));
-        Assert.Equal(0, recorder.Count("orionsaga.steps:failed"));
-        Assert.Equal(0, recorder.Count("orionsaga.compensations:compensated"));
+        Assert.Equal(1, recorder.Count("orion.saga.runs:succeeded"));
+        Assert.Equal(0, recorder.Count("orion.saga.runs:failed"));
+        Assert.Equal(2, recorder.Count("orion.saga.steps:completed"));
+        Assert.Equal(0, recorder.Count("orion.saga.steps:failed"));
+        Assert.Equal(0, recorder.Count("orion.saga.compensations:compensated"));
     }
 
     [Fact]
@@ -107,14 +107,14 @@ public sealed class SagaDiagnosticsTests
 
         await saga.RunAsync(new object());
 
-        Assert.Equal(1, recorder.Count("orionsaga.runs:failed"));
-        Assert.Equal(0, recorder.Count("orionsaga.runs:succeeded"));
+        Assert.Equal(1, recorder.Count("orion.saga.runs:failed"));
+        Assert.Equal(0, recorder.Count("orion.saga.runs:succeeded"));
         // a and b completed, c failed.
-        Assert.Equal(2, recorder.Count("orionsaga.steps:completed"));
-        Assert.Equal(1, recorder.Count("orionsaga.steps:failed"));
+        Assert.Equal(2, recorder.Count("orion.saga.steps:completed"));
+        Assert.Equal(1, recorder.Count("orion.saga.steps:failed"));
         // a and b compensate cleanly.
-        Assert.Equal(2, recorder.Count("orionsaga.compensations:compensated"));
-        Assert.Equal(0, recorder.Count("orionsaga.compensations:failed"));
+        Assert.Equal(2, recorder.Count("orion.saga.compensations:compensated"));
+        Assert.Equal(0, recorder.Count("orion.saga.compensations:failed"));
     }
 
     [Fact]
@@ -132,8 +132,8 @@ public sealed class SagaDiagnosticsTests
 
         await saga.RunAsync(new object());
 
-        Assert.Equal(1, recorder.Count("orionsaga.compensations:compensated"));
-        Assert.Equal(1, recorder.Count("orionsaga.compensations:failed"));
+        Assert.Equal(1, recorder.Count("orion.saga.compensations:compensated"));
+        Assert.Equal(1, recorder.Count("orion.saga.compensations:failed"));
     }
 
     [Fact]
@@ -162,9 +162,9 @@ public sealed class SagaDiagnosticsTests
         Assert.NotNull(diagnostics.Runs);
         Assert.NotNull(diagnostics.Steps);
         Assert.NotNull(diagnostics.Compensations);
-        Assert.Equal("orionsaga.runs", diagnostics.Runs.Name);
-        Assert.Equal("orionsaga.steps", diagnostics.Steps.Name);
-        Assert.Equal("orionsaga.compensations", diagnostics.Compensations.Name);
+        Assert.Equal("orion.saga.runs", diagnostics.Runs.Name);
+        Assert.Equal("orion.saga.steps", diagnostics.Steps.Name);
+        Assert.Equal("orion.saga.compensations", diagnostics.Compensations.Name);
     }
 
     [Fact]

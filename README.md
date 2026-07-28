@@ -23,7 +23,8 @@ money and inventory stranded. Writing that rollback by hand is error-prone. Orio
 declare each step next to its compensation and runs the unwind for you when something breaks.
 
 The whole library is one generic executor over your own context type, with no dependency beyond the
-DI abstractions. There is no message broker, no database, and no background process to operate.
+DI abstractions and the family's shared `Orion.Abstractions` contracts spine. There is no message
+broker, no database, and no background process to operate.
 
 ---
 
@@ -64,8 +65,9 @@ the steps that fully completed are unwound.
 dotnet add package OrionSaga
 ```
 
-Targets `net8.0`, `net9.0`, and `net10.0`. The only runtime dependency is
-`Microsoft.Extensions.DependencyInjection.Abstractions`.
+Targets `net8.0`, `net9.0`, and `net10.0`. The runtime dependencies are
+`Microsoft.Extensions.DependencyInjection.Abstractions` and `Orion.Abstractions` (the family's
+shared contracts spine, which supplies the `OrionInstrumentation` telemetry base).
 
 ---
 
@@ -359,13 +361,13 @@ container, so the diagnostics singleton is the only thing registered.
 
 Build a saga with `.WithDiagnostics(...)` to emit metrics to the `Moongazing.OrionSaga` meter,
 exposed as the `SagaDiagnostics.MeterName` constant. Three counters are published, each tagged with
-an `outcome`:
+an `orion.outcome` tag:
 
 | Instrument | Tag values | Counts |
 |------------|------------|--------|
-| `orionsaga.runs` | `succeeded` / `failed` | Saga runs. |
-| `orionsaga.steps` | `completed` / `failed` | Step forward actions. |
-| `orionsaga.compensations` | `compensated` / `failed` | Compensations run during rollback. |
+| `orion.saga.runs` | `succeeded` / `failed` | Saga runs. |
+| `orion.saga.steps` | `completed` / `failed` | Step forward actions. |
+| `orion.saga.compensations` | `compensated` / `failed` | Compensations run during rollback. |
 
 Wire it up with the DI singleton and subscribe with OpenTelemetry by meter name:
 
@@ -449,7 +451,7 @@ See [benchmarks.md](benchmarks.md) for the benchmark classes and how to run or f
 
 - Multi-targets `net8.0`, `net9.0`, `net10.0`.
 - `TreatWarningsAsErrors`, latest analyzers, nullable enabled.
-- The executor is generic over your context type and has no dependency beyond the DI abstractions.
+- The executor is generic over your context type; the runtime dependencies are the DI abstractions and `Orion.Abstractions` (the family's shared contracts spine).
 - A built saga is immutable and safe to reuse across runs.
 
 ---
@@ -462,7 +464,7 @@ OrionSaga follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Th
 changes to that surface come with a major version bump. See [CHANGELOG.md](CHANGELOG.md) for the
 release history.
 
-The library is currently at **0.6.0**: the API is young and may still change ahead of a 1.0.
+The library is currently at **0.7.0**: the API is young and may still change ahead of a 1.0.
 
 ---
 

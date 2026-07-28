@@ -6,6 +6,30 @@ All notable changes to OrionSaga are documented in this file. The format is base
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-28
+
+### Changed
+
+- **Converged the OpenTelemetry instrumentation onto the frozen `Orion.Abstractions` 1.0 spine.**
+  `SagaDiagnostics` now derives from `OrionInstrumentation` and names its metrics through
+  `OrionTelemetry`, so OrionSaga shares the family's naming and static-tag conventions. Multi-tenant
+  / multi-region labels set via `OrionInstrumentation.SetStaticTags` are stamped onto every
+  measurement, and the meter version now tracks the package version automatically. References
+  `Orion.Abstractions` 1.0.0.
+
+  **Breaking (telemetry only): metric and tag names changed.** The meter name is unchanged
+  (`Moongazing.OrionSaga` — subscribers keep working). Update dashboards/alerts:
+
+  | Before | After |
+  | --- | --- |
+  | `orionsaga.runs` | `orion.saga.runs` |
+  | `orionsaga.steps` | `orion.saga.steps` |
+  | `orionsaga.compensations` | `orion.saga.compensations` |
+  | tag `outcome` | tag `orion.outcome` |
+
+  Every tag value (`succeeded`/`failed`, `completed`/`failed`, `compensated`/`failed`) is unchanged,
+  as are the public `Runs` / `Steps` / `Compensations` instruments and the `MeterName` constant.
+
 ## [0.6.0] - 2026-06-28
 
 ### Added
@@ -195,6 +219,7 @@ Initial release. In-process saga orchestration.
 compensation-failure isolation, empty saga, cancellation rollback, observer notifications and fault
 isolation, and registration.
 
+[0.7.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.7.0
 [0.6.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tunahanaliozturk/OrionSaga/releases/tag/v0.4.0

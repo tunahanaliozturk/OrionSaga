@@ -75,8 +75,8 @@ if (!result.Succeeded)
 
 ## Telemetry and events
 
-Build with `.WithDiagnostics(...)` to emit to the `Moongazing.OrionSaga` meter: `orionsaga.runs`,
-`orionsaga.steps`, and `orionsaga.compensations`, each tagged with an outcome. Add an
+Build with `.WithDiagnostics(...)` to emit to the `Moongazing.OrionSaga` meter: `orion.saga.runs`,
+`orion.saga.steps`, and `orion.saga.compensations`, each tagged with an outcome. Add an
 `ISagaObserver` with `.WithObserver(...)` to react to step completion, failure, and compensation.
 The observer is fault-safe.
 
@@ -91,7 +91,7 @@ exactly enough, and it stays dependency-light.
 
 - Multi-targets `net8.0`, `net9.0`, `net10.0`.
 - `TreatWarningsAsErrors`, latest analyzers, nullable enabled.
-- The executor is generic over your context type and has no dependency beyond the DI abstractions.
+- The executor is generic over your context type; the runtime dependencies are the DI abstractions and `Orion.Abstractions` (the family's shared contracts spine).
 
 ## License
 

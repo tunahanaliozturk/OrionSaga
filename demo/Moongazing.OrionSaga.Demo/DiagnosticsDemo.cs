@@ -34,7 +34,7 @@ public static class DiagnosticsDemo
             var outcome = "unknown";
             foreach (var tag in tags)
             {
-                if (tag.Key == "outcome" && tag.Value is string value)
+                if (tag.Key == "orion.outcome" && tag.Value is string value)
                 {
                     outcome = value;
                 }
