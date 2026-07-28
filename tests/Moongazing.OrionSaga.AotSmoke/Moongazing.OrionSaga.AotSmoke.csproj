@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!--
+      NativeAOT publish smoke test. `dotnet publish` on this project must succeed with zero
+      trim/AOT warnings, exercising saga orchestration (build, run a success path, and run a
+      failing saga that compensates) in a rooted, trimmed, native binary.
+    -->
+    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks />
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Moongazing.OrionSaga\Moongazing.OrionSaga.csproj" />
+  </ItemGroup>
+</Project>
