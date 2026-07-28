@@ -462,7 +462,7 @@ OrionSaga follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Th
 changes to that surface come with a major version bump. See [CHANGELOG.md](CHANGELOG.md) for the
 release history.
 
-The library is currently at **0.3.0**: the API is young and may still change ahead of a 1.0.
+The library is currently at **0.6.0**: the API is young and may still change ahead of a 1.0.
 
 ---
 
