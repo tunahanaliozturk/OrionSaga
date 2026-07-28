@@ -131,9 +131,9 @@ registered, an internal `NullSagaObserver` no-op is used.
 
 | Instrument | Tag values |
 |------------|------------|
-| `orionsaga.runs` | `succeeded` / `failed` |
-| `orionsaga.steps` | `completed` / `failed` |
-| `orionsaga.compensations` | `compensated` / `failed` |
+| `orion.saga.runs` | `succeeded` / `failed` |
+| `orion.saga.steps` | `completed` / `failed` |
+| `orion.saga.compensations` | `compensated` / `failed` |
 
 Attach an instance with `WithDiagnostics` and subscribe with OpenTelemetry by meter name.
 `SagaDiagnostics` owns the meter and is `IDisposable`.
@@ -160,7 +160,7 @@ concurrently with different context instances.
 ## 11. Multi-targeting and dependencies
 
 - Targets `net8.0`, `net9.0`, and `net10.0`.
-- The only runtime dependency is `Microsoft.Extensions.DependencyInjection.Abstractions`.
+- The runtime dependencies are `Microsoft.Extensions.DependencyInjection.Abstractions` and `Orion.Abstractions` (the family's shared contracts spine).
 - Built with nullable reference types enabled, latest analyzers, and `TreatWarningsAsErrors`.
 - Ships an XML documentation file and a symbol package.
 </content>

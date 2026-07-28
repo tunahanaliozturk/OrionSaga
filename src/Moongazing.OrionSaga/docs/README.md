@@ -75,8 +75,8 @@ if (!result.Succeeded)
 
 ## Telemetry and events
 
-Build with `.WithDiagnostics(...)` to emit to the `Moongazing.OrionSaga` meter: `orionsaga.runs`,
-`orionsaga.steps`, and `orionsaga.compensations`, each tagged with an outcome. Add an
+Build with `.WithDiagnostics(...)` to emit to the `Moongazing.OrionSaga` meter: `orion.saga.runs`,
+`orion.saga.steps`, and `orion.saga.compensations`, each tagged with an outcome. Add an
 `ISagaObserver` with `.WithObserver(...)` to react to step completion, failure, and compensation.
 The observer is fault-safe.
 

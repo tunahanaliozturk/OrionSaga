@@ -64,8 +64,9 @@ the steps that fully completed are unwound.
 dotnet add package OrionSaga
 ```
 
-Targets `net8.0`, `net9.0`, and `net10.0`. The only runtime dependency is
-`Microsoft.Extensions.DependencyInjection.Abstractions`.
+Targets `net8.0`, `net9.0`, and `net10.0`. The runtime dependencies are
+`Microsoft.Extensions.DependencyInjection.Abstractions` and `Orion.Abstractions` (the family's
+shared contracts spine, which supplies the `OrionInstrumentation` telemetry base).
 
 ---
 
@@ -363,9 +364,9 @@ an `outcome`:
 
 | Instrument | Tag values | Counts |
 |------------|------------|--------|
-| `orionsaga.runs` | `succeeded` / `failed` | Saga runs. |
-| `orionsaga.steps` | `completed` / `failed` | Step forward actions. |
-| `orionsaga.compensations` | `compensated` / `failed` | Compensations run during rollback. |
+| `orion.saga.runs` | `succeeded` / `failed` | Saga runs. |
+| `orion.saga.steps` | `completed` / `failed` | Step forward actions. |
+| `orion.saga.compensations` | `compensated` / `failed` | Compensations run during rollback. |
 
 Wire it up with the DI singleton and subscribe with OpenTelemetry by meter name:
 
@@ -462,7 +463,7 @@ OrionSaga follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Th
 changes to that surface come with a major version bump. See [CHANGELOG.md](CHANGELOG.md) for the
 release history.
 
-The library is currently at **0.6.0**: the API is young and may still change ahead of a 1.0.
+The library is currently at **0.7.0**: the API is young and may still change ahead of a 1.0.
 
 ---
 
