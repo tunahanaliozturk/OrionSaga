@@ -23,7 +23,8 @@ money and inventory stranded. Writing that rollback by hand is error-prone. Orio
 declare each step next to its compensation and runs the unwind for you when something breaks.
 
 The whole library is one generic executor over your own context type, with no dependency beyond the
-DI abstractions. There is no message broker, no database, and no background process to operate.
+DI abstractions and the family's shared `Orion.Abstractions` contracts spine. There is no message
+broker, no database, and no background process to operate.
 
 ---
 
@@ -360,7 +361,7 @@ container, so the diagnostics singleton is the only thing registered.
 
 Build a saga with `.WithDiagnostics(...)` to emit metrics to the `Moongazing.OrionSaga` meter,
 exposed as the `SagaDiagnostics.MeterName` constant. Three counters are published, each tagged with
-an `outcome`:
+an `orion.outcome` tag:
 
 | Instrument | Tag values | Counts |
 |------------|------------|--------|
@@ -450,7 +451,7 @@ See [benchmarks.md](benchmarks.md) for the benchmark classes and how to run or f
 
 - Multi-targets `net8.0`, `net9.0`, `net10.0`.
 - `TreatWarningsAsErrors`, latest analyzers, nullable enabled.
-- The executor is generic over your context type and has no dependency beyond the DI abstractions.
+- The executor is generic over your context type; the runtime dependencies are the DI abstractions and `Orion.Abstractions` (the family's shared contracts spine).
 - A built saga is immutable and safe to reuse across runs.
 
 ---

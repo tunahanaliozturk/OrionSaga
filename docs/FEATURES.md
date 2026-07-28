@@ -1,6 +1,6 @@
 # OrionSaga Features
 
-A complete reference of what OrionSaga does today, at version **0.1.0**. Every item here maps to a
+A complete reference of what OrionSaga does today, at version **0.7.0**. Every item here maps to a
 public type or behavior in the shipped library. For where the library may go next, see
 [ROADMAP.md](ROADMAP.md).
 
@@ -127,7 +127,7 @@ registered, an internal `NullSagaObserver` no-op is used.
 ## 8. Diagnostics and metrics
 
 `SagaDiagnostics` exposes a `System.Diagnostics.Metrics.Meter` named `Moongazing.OrionSaga` (the
-`SagaDiagnostics.MeterName` constant) with three counters, each tagged with an `outcome`:
+`SagaDiagnostics.MeterName` constant) with three counters, each tagged with `orion.outcome`:
 
 | Instrument | Tag values |
 |------------|------------|

@@ -44,9 +44,7 @@ public static class SagaActivitySource
     public const string OutcomeTag = "orionsaga.outcome";
 
     /// <summary>The shared source. Process-lifetime instrumentation; not disposed.</summary>
-    internal static readonly ActivitySource Source = new(Name, ThisAssemblyVersion);
-
-    // The package version, kept in one place so the activity source and the meter report the same value.
-    // Bumped alongside the assembly version on each release.
-    private const string ThisAssemblyVersion = "0.6.0";
+    // Versioned from the assembly's informational version (via MeterVersion), so the activity source
+    // and the meter always report the same value and neither drifts behind a hardcoded literal.
+    internal static readonly ActivitySource Source = new(Name, MeterVersion.Value);
 }
