@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/tunahanaliozturk/OrionSaga#readme
+    about: The README documents the real behaviour of OrionSaga. Read it before asking "how do I ...".
+  - name: Feature reference
+    url: https://github.com/tunahanaliozturk/OrionSaga/blob/main/docs/FEATURES.md
+    about: Everything OrionSaga does today, one section per capability.
+  - name: Roadmap
+    url: https://github.com/tunahanaliozturk/OrionSaga/blob/main/docs/ROADMAP.md
+    about: What is planned. To ask for a planned item, open a feature request that names it.
+  - name: Security vulnerability
+    url: https://github.com/tunahanaliozturk/OrionSaga/blob/main/SECURITY.md
+    about: Do not file a public issue. Report it privately as described in SECURITY.md.

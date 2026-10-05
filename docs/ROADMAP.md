@@ -2,19 +2,20 @@
 
 Where OrionSaga has been and where it might go next.
 
-Current release: **0.6.0**. An in-process saga orchestrator that runs an ordered set of steps over a
+Current release: **0.7.0**. An in-process saga orchestrator that runs an ordered set of steps over a
 shared context and compensates the completed steps in reverse order when one fails, cancels, or
 overruns its timeout, with opt-in per-step retry, compensation retry, a bounded rollback budget,
 composition and control flow (conditional steps, sub-sagas, and parallel step groups), and
 observability: meter counters, `Activity` tracing spans per run / step / compensation, and a read-only
-in-progress run snapshot.
+in-progress run snapshot, with its metrics named by the family's shared `Orion.Abstractions`
+telemetry conventions.
 
 This document records what has shipped and lays out a forward plan. The shipped section is fact. The
 forward plan is a direction with rough version targets, not a contract: items move, merge, and get
-dropped as real usage shows what matters. If you want something here, open an issue and describe the
-workload that needs it; demand is what moves an idea forward.
+dropped as real usage shows what matters. If you want something here, open a feature request that
+names the item and describes the workload that needs it; demand is what moves an idea forward.
 
-For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, 0.3.0, 0.4.0, 0.5.0, and 0.6.0 additions are in the Released section below and in the [changelog](../CHANGELOG.md).
+For the full capability list see [FEATURES.md](FEATURES.md); each release's additions are in the Released section below and in the [changelog](../CHANGELOG.md).
 
 ---
 
@@ -23,7 +24,8 @@ For the capability baseline see [FEATURES.md](FEATURES.md); the 0.2.0, 0.2.1, 0.
 OrionSaga is deliberately small. It is an in-process orchestrator with one job: run a few steps and
 unwind them cleanly when one fails. Any addition is weighed against that focus.
 
-1. **Stay dependency-light.** The core leans on nothing but the DI abstractions. Features that pull in
+1. **Stay dependency-light.** The core leans on nothing but the DI abstractions and the family's
+   `Orion.Abstractions` contracts spine. Features that pull in
    heavy dependencies belong in optional companion packages, not the core.
 2. **Do not pretend to be a durable workflow engine.** OrionSaga coordinates one operation inside one
    process. Durable, resumable, cross-process workflow is a different product with different
@@ -38,14 +40,24 @@ unwind them cleanly when one fails. Any addition is weighed against that focus.
 
 What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the full history.
 
+### 0.7.0
+
+- **Telemetry on the `Orion.Abstractions` 1.0 spine.** `SagaDiagnostics` derives from
+  `OrionInstrumentation` and names its metrics through `OrionTelemetry`: the counters are now
+  `orion.saga.runs`, `orion.saga.steps` and `orion.saga.compensations`, tagged `orion.outcome`
+  (breaking for dashboards; the meter name `Moongazing.OrionSaga` and the tag values are unchanged).
+  Static tags set with `SetStaticTags` are stamped onto every measurement, and the meter version
+  follows the package version.
+
 ### 0.6.0
 
 - **Activity / tracing integration.** The executor emits a `System.Diagnostics.Activity` span per saga
   run, per step, and per compensation, from an `ActivitySource` named `Moongazing.OrionSaga` (the same
   name as the meter, exposed with its tag and span-name constants on `SagaActivitySource`). Step spans
   nest under the run span and a parallel group's member spans nest under the group's slot span, so a
-  trace shows the orchestration shape next to the meter counters. Each span carries the step name,
-  one-based ordinal, an outcome tag, and a duration. `StartActivity` returns null when no listener is
+  trace shows the orchestration shape next to the meter counters. Every span carries an outcome tag
+  and a duration; step and compensation spans also carry the step name and one-based ordinal (a
+  parallel group member's span carries the name only). `StartActivity` returns null when no listener is
   registered, so the no-listener happy path starts no `Activity` and allocates nothing for tracing.
 - **Saga-state inspection.** A read-only `SagaRunSnapshot` of a run in progress (current step, completed
   steps, pending steps, and `WouldCompensate`), handed to the new default no-op
@@ -92,7 +104,7 @@ What already ships, newest first. See [CHANGELOG.md](../CHANGELOG.md) for the fu
   declared per step via `forwardRetry` on `AddStep` / `AddResultStep` / `SagaStep`, so a transient
   forward fault is retried before the step is treated as a failure and a flaky call does not force a
   full rollback. Cancellation and per-step timeouts are terminal and never retried; a per-step timeout,
-  when set, bounds each attempt individually, and backoff waits honour the step's cancellation token.
+  when set, bounds each attempt individually, and backoff waits honour the run's cancellation token.
 - **Compensation retry.** The same `RetryPolicy` for a step's compensation, declared per step via
   `compensationRetry` or saga-wide via `WithCompensationRetry` (per-step overrides saga-wide), since a
   failed undo is the most expensive outcome. A transient compensation fault is retried before being
@@ -178,8 +190,9 @@ above. What remains here:
 These extend OrionSaga without adding dependencies to the in-process core. Each would ship as a
 separate package and is gated on clear demand.
 
-- **Reliable side effects via an outbox.** Bridge a saga's effects to a transactional outbox so a
-  step's external message is published in the same transaction as its local state change, using
+- **Reliable side effects via an outbox.** Bridge a saga's effects to an outbox so a step's external
+  message is written in the same database transaction as its local state change and published
+  afterwards by the outbox dispatcher, using
   [OrionPatch](https://github.com/tunahanaliozturk/OrionPatch) as the outbox.
 - **Durable saga store.** An optional persistence seam that records step progress so a crashed run can
   be inspected and, where steps are idempotent, resumed. This does not turn the core into a workflow
@@ -199,13 +212,14 @@ what it is:
 - **A scheduler or background host.** OrionSaga runs when you call `RunAsync`; it owns no threads of
   its own.
 
-If your use case needs one of these, that is useful signal. Open an issue and describe it.
+If your use case needs one of these, that is useful signal. Open a feature request and describe it.
 
 ---
 
 ## How to influence this
 
-- Open an issue describing the workload, not just the feature. "I have N steps across M systems and
+- Open a feature request that names the roadmap item (or the new idea) and describes the workload,
+  not just the feature. "I have N steps across M systems and
   need X" is far more actionable than "please add X".
 - Real demand reorders this list. A clear, common need beats a clever but speculative one.
 - Small, focused pull requests that fit the principles above are welcome.
