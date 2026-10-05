@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="834" viewBox="0 0 1200 834">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif; fill: #1e1b4b; }
+    .title { font-size: 24px; font-weight: 700; }
+    .subtitle { font-size: 14px; fill: #475569; }
+    .label { font-size: 15px; font-weight: 600; }
+    .small { font-size: 12.5px; fill: #475569; }
+    .code { font-family: "Cascadia Code", Consolas, "SF Mono", monospace; font-size: 13px; fill: #3730a3; }
+    .edge { font-size: 12.5px; fill: #334155; }
+    .step { fill: #eef2ff; stroke: #4f46e5; stroke-width: 2; }
+    .ext { fill: #f0f9ff; stroke: #0284c7; stroke-width: 2; }
+    .ok { fill: #ecfdf5; stroke: #059669; stroke-width: 2; }
+    .fail { fill: #fef2f2; stroke: #dc2626; stroke-width: 2; }
+    .decision { fill: #fffbeb; stroke: #d97706; stroke-width: 2; }
+    .note { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .lane { stroke: #cbd5e1; stroke-width: 1.5; stroke-dasharray: 6 5; }
+    .flow { fill: none; stroke: #64748b; stroke-width: 2; marker-end: url(#arrow); }
+    .flow.alt { stroke: #dc2626; stroke-dasharray: 6 4; marker-end: url(#arrow-fail); }
+    .flow.back { stroke-dasharray: 6 4; }
+    .badge { fill: #4f46e5; }
+    .badge-text { font-size: 12px; font-weight: 700; fill: #ffffff; }
+  </style>
+
+  <rect width="1200" height="834" fill="#ffffff"/>
+
+  <text class="title" x="40" y="52">OrionSaga - rollback, one undo at a time</text>
+  <text class="subtitle" x="40" y="78">Every completed unit is undone newest first; a failed undo is recorded and the next one still runs.</text>
+
+  <rect class="fail" x="40" y="120" width="300" height="80" rx="14"/>
+  <text class="label" x="190" y="148" text-anchor="middle">Run ended: Failed or Cancelled</text>
+  <text class="small" x="190" y="170" text-anchor="middle">the step that ended it is not undone</text>
+  <text class="small" x="190" y="188" text-anchor="middle">(a failed group's finished members are)</text>
+  <path class="flow" d="M340,160 L418,160"/>
+
+  <rect class="step" x="420" y="120" width="360" height="80" rx="14"/>
+  <text class="label" x="600" y="148" text-anchor="middle">Next undo, newest first</text>
+  <text class="small" x="600" y="170" text-anchor="middle">completed steps in reverse; a parallel group's</text>
+  <text class="small" x="600" y="188" text-anchor="middle">completed members in reverse declaration order</text>
+
+  <path class="flow" d="M780,160 L878,160"/>
+  <text class="edge" x="829" y="150" text-anchor="middle">none left</text>
+  <rect class="ok" x="880" y="112" width="280" height="96" rx="14"/>
+  <text class="label" x="1020" y="138" text-anchor="middle">SagaResult</text>
+  <text class="small" x="1020" y="160" text-anchor="middle">RolledBackCleanly = true only when</text>
+  <text class="small" x="1020" y="178" text-anchor="middle">CompensationFailures is empty and</text>
+  <text class="small" x="1020" y="196" text-anchor="middle">RollbackTimedOut = false</text>
+
+  <!-- budget -->
+  <path class="flow" d="M600,200 L600,218"/>
+  <polygon class="decision" points="600,220 710,270 600,320 490,270"/>
+  <text class="code" x="600" y="266" text-anchor="middle">rollback budget</text>
+  <text class="small" x="600" y="286" text-anchor="middle">elapsed?</text>
+
+  <path class="flow alt" d="M490,270 L402,270"/>
+  <text class="edge" x="446" y="260" text-anchor="middle">yes</text>
+  <rect class="fail" x="40" y="230" width="360" height="80" rx="14"/>
+  <text class="label" x="220" y="256" text-anchor="middle">Not attempted</text>
+  <text class="small" x="220" y="278" text-anchor="middle">CompensationFailure (OperationCanceledException)</text>
+  <text class="small" x="220" y="296" text-anchor="middle">RollbackTimedOut = true</text>
+
+  <path class="flow" d="M600,320 L600,368"/>
+  <text class="edge" x="612" y="350">no, or no budget</text>
+
+  <!-- compensate -->
+  <rect class="step" x="420" y="370" width="360" height="80" rx="14"/>
+  <text class="label" x="600" y="396" text-anchor="middle">Compensate</text>
+  <text class="code" x="600" y="418" text-anchor="middle">step.Compensate(ctx, rollbackToken)</text>
+  <text class="small" x="600" y="438" text-anchor="middle">no compensate delegate = a no-op that succeeds</text>
+
+  <path class="flow" d="M600,450 L600,468"/>
+  <polygon class="decision" points="600,470 710,520 600,570 490,520"/>
+  <text class="label" x="600" y="525" text-anchor="middle">threw?</text>
+
+  <path class="flow" d="M710,520 L818,520"/>
+  <text class="edge" x="764" y="510" text-anchor="middle">no</text>
+  <rect class="ok" x="820" y="480" width="340" height="80" rx="14"/>
+  <text class="label" x="990" y="508" text-anchor="middle">Compensated</text>
+  <text class="small" x="990" y="530" text-anchor="middle">StepsCompensated + 1</text>
+  <text class="small" x="990" y="548" text-anchor="middle">observer: OnCompensated</text>
+
+  <path class="flow alt" d="M600,570 L600,618"/>
+  <text class="edge" x="612" y="600">yes</text>
+  <polygon class="decision" points="600,620 710,670 600,720 490,670"/>
+  <text class="code" x="600" y="666" text-anchor="middle">compensationRetry</text>
+  <text class="small" x="600" y="686" text-anchor="middle">attempts left?</text>
+
+  <path class="flow" d="M490,670 L402,670"/>
+  <text class="edge" x="446" y="660" text-anchor="middle">yes</text>
+  <rect class="step" x="40" y="630" width="360" height="80" rx="14"/>
+  <text class="label" x="220" y="656" text-anchor="middle">Backoff wait</text>
+  <text class="code" x="220" y="678" text-anchor="middle">DelayBeforeAttempt(n)</text>
+  <text class="small" x="220" y="698" text-anchor="middle">step's policy, else WithCompensationRetry</text>
+  <path class="flow back" d="M220,630 L220,410 L418,410"/>
+  <text class="edge" x="232" y="400">retry</text>
+
+  <path class="flow alt" d="M710,670 L818,670"/>
+  <text class="edge" x="764" y="660" text-anchor="middle">no</text>
+  <rect class="fail" x="820" y="630" width="340" height="80" rx="14"/>
+  <text class="label" x="990" y="656" text-anchor="middle">Undo failed</text>
+  <text class="small" x="990" y="678" text-anchor="middle">CompensationFailure(StepName, exception)</text>
+  <text class="small" x="990" y="696" text-anchor="middle">observer: OnCompensationFailed</text>
+
+  <rect class="note" x="40" y="740" width="1120" height="64" rx="10"/>
+  <text class="small" x="56" y="766">Each outcome (compensated, failed, not attempted) goes back to "Next undo". A budget that fires during an undo is not retried:</text>
+  <text class="small" x="56" y="788">that undo is recorded as a failure and RollbackTimedOut = true. Without WithRollbackBudget the token never cancels.</text>
+</svg>
